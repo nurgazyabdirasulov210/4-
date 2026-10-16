@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Hand Figure</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&display=swap" rel="stylesheet" />
+  <style>
+:root {
+  --bg: #f3f6fb;
+  --ink: #14213d;
+  --muted: #5b6b86;
+  --accent: #2563eb;
+  --accent-soft: #dbe7ff;
+  --panel: rgba(255, 255, 255, 0.88);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+}
+
+#cam {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+#fx, #skel {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+
+#fx { mix-blend-mode: screen; }
+
+.hint {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.status {
+  position: fixed;
+  left: 14px;
+  bottom: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
+.legend {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  width: 270px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 24px rgba(20, 33, 61, 0.18);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.legend ul {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.legend li.active { background: var(--accent-soft); }
+
+.legend .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.legend p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.start {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--bg);
+}
+
+.start.hidden { display: none; }
+
+.card {
+  max-width: 440px;
+  padding: 32px;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 40px rgba(20, 33, 61, 0.12);
+}
+
+.card h1 {
+  margin: 0 0 10px;
+  font-size: 30px;
+  font-weight: 800;
+}
+
+.card p {
+  margin: 0 0 22px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.card button {
+  width: 100%;
+  padding: 14px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.card button:hover { background: #1d4fd0; }
+.card button:focus-visible { outline: 3px solid #93b4fb; outline-offset: 2px; }
+.card button:disabled { opacity: 0.6; cursor: default; }
+
+.card .msg { margin: 16px 0 0; min-height: 1.4em; font-size: 14px; }
+.card .msg.error { color: #c0392b; }
+
+@media (max-width: 700px) {
+  .legend { width: auto; left: 12px; right: 12px; top: 12px; font-size: 12px; }
+  .legend p { display: none; }
+  .legend ul { grid-template-columns: repeat(3, 1fr); }
+}
+</style>
+</head>
+<body>
+  <video id="cam" playsinline muted></video>
+  <canvas id="fx"></canvas>
+  <canvas id="skel"></canvas>
+
+  <div id="hint" class="hint" hidden>Покажите руку в кадр</div>
+  <div id="status" class="status"></div>
+
+  <aside id="legend" class="legend" hidden>
+    <ul id="legend-list"></ul>
+    <p>Вторая рука: сводите и разводите большой и указательный пальцы, чтобы менять размер.</p>
+    <p>Поворачивайте ладонь, и фигура повернётся вместе с ней.</p>
+  </aside>
+
+  <section id="start" class="start">
+    <div class="card">
+      <h1>Hand Figure</h1>
+      <p>Покажите руку в камеру, и рядом появится светящаяся фигура. Число поднятых пальцев выбирает фигуру, а вторая рука меняет размер.</p>
+      <button id="start-btn" type="button">Включить камеру</button>
+      <p id="start-msg" class="msg" role="status"></p>
+    </div>
+  </section>
+
+  <script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+function toPixels(landmarks, vw, vh) {
+  return landmarks.map((p) => ({ x: p.x * vw, y: p.y * vh, z: p.z * vw }));
+}
+
+function countFingers(p) {
+  const palm = dist(p[0], p[9]);
+  let count = 0;
+
+  const pairs = [[8, 6], [12, 10], [16, 14], [20, 18]];
+  for (const [tip, joint] of pairs) {
+    if (dist(p[tip], p[0]) > dist(p[joint], p[0]) * 1.12) count++;
+  }
+
+  const thumbOut =
+    dist(p[4], p[17]) > dist(p[3], p[17]) * 1.08 &&
+    dist(p[4], p[5]) > palm * 0.55;
+  if (thumbOut) count++;
+
+  return count;
+}
+
+function pinchRatio(p) {
+  const palm = dist(p[0], p[9]) || 1;
+  return dist(p[4], p[8]) / palm;
+}
+
+function ratioToScale(ratio) {
+  const t = Math.min(1, Math.max(0, (ratio - 0.12) / 1.0));
+  return 0.35 + t * 2.85;
+}
+
+const LINKS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20],
+  [0, 17],
+];
+
+function drawHand(ctx, pts, color, pinch) {
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.85;
+
+  ctx.beginPath();
+  for (const [a, b] of LINKS) {
+    ctx.moveTo(pts[a].x, pts[a].y);
+    ctx.lineTo(pts[b].x, pts[b].y);
+  }
+  ctx.stroke();
+
+  for (const p of pts) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (pinch) {
+    ctx.strokeStyle = '#6aa3ff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(pts[4].x, pts[4].y);
+    ctx.lineTo(pts[8].x, pts[8].y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+
+const FIGURES = [
+  { count: 1, name: 'Тетраэдр', color: 0x39e6ff, make: () => new THREE.TetrahedronGeometry(1.15) },
+  { count: 2, name: 'Куб', color: 0x5dff8a, make: () => new THREE.BoxGeometry(1.5, 1.5, 1.5) },
+  { count: 3, name: 'Октаэдр', color: 0xffe14a, make: () => new THREE.OctahedronGeometry(1.15) },
+  { count: 4, name: 'Додекаэдр', color: 0xff8a2b, make: () => new THREE.DodecahedronGeometry(1.05) },
+  { count: 5, name: 'Икосаэдр', color: 0xff4fb8, make: () => new THREE.IcosahedronGeometry(1.1) },
+  { count: 0, name: 'Тор', color: 0xdfeaff, make: () => new THREE.TorusGeometry(0.95, 0.32, 10, 28) },
+];
+
+const TRAIL = 6;
+const TRAIL_STEP = 3;
+
+function easeOutBack(t) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+class FigureSet {
+  constructor(scene) {
+    this.items = new Map();
+    this.active = null;
+    this.pop = 1;
+    this.pixelRatio = 1;
+    this.history = [];
+    this.idle = 0;
+
+    for (const fig of FIGURES) {
+      const base = fig.make();
+      const edges = new THREE.EdgesGeometry(base, 5);
+      const lineGeo = new LineSegmentsGeometry().fromEdgesGeometry(edges);
+
+      const group = new THREE.Group();
+      group.visible = false;
+      const layers = [];
+
+      for (let i = 0; i <= TRAIL; i++) {
+        const mat = new LineMaterial({
+          color: fig.color,
+          linewidth: i === 0 ? 3.2 : 2,
+          transparent: true,
+          opacity: i === 0 ? 1 : 0.5 * (1 - i / (TRAIL + 1)),
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: false,
+        });
+        mat.userData.baseWidth = i === 0 ? 3.2 : 2;
+        const line = new LineSegments2(lineGeo, mat);
+        group.add(line);
+        layers.push(line);
+      }
+
+      const coreMat = new LineMaterial({
+        color: 0xffffff,
+        linewidth: 1.4,
+        transparent: true,
+        opacity: 0.35,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+      });
+      coreMat.userData.baseWidth = 1.4;
+      const core = new LineSegments2(lineGeo, coreMat);
+      group.add(core);
+
+      scene.add(group);
+      this.items.set(fig.count, { fig, group, layers, core });
+    }
+  }
+
+  resize(w, h, pixelRatio) {
+    this.pixelRatio = pixelRatio;
+    for (const { group } of this.items.values()) {
+      for (const line of group.children) {
+        line.material.resolution.set(w * pixelRatio, h * pixelRatio);
+        line.material.linewidth = line.material.userData.baseWidth * pixelRatio;
+      }
+    }
+  }
+
+  setActive(count) {
+    if (this.active === count) return;
+    if (this.active !== null) this.items.get(this.active).group.visible = false;
+    this.active = count;
+    this.items.get(count).group.visible = true;
+    this.pop = 0;
+  }
+
+  update(dt, state) {
+    if (this.active === null) return;
+    const item = this.items.get(this.active);
+
+    this.pop = Math.min(1, this.pop + dt / 0.5);
+    this.idle += dt * 0.7;
+
+    const popScale = this.pop >= 1 ? 1 : Math.max(0.001, easeOutBack(this.pop));
+    const size = state.size * state.scale * popScale * state.presence;
+
+    this.history.push({ x: state.x, y: state.y, q: state.quat.clone(), s: size });
+    if (this.history.length > TRAIL * TRAIL_STEP + 2) this.history.shift();
+
+    item.group.visible = state.presence > 0.01;
+
+    const spin = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0.3, 1, 0.2).normalize(),
+      this.idle
+    );
+
+    item.layers.forEach((line, i) => {
+      const idx = Math.max(0, this.history.length - 1 - i * TRAIL_STEP);
+      const h = this.history[idx];
+      line.position.set(h.x, h.y, 0);
+      line.quaternion.copy(h.q).multiply(spin);
+      line.scale.setScalar(Math.max(0.001, h.s));
+    });
+
+    const coreQ = state.quat.clone().multiply(spin).multiply(spin);
+    item.core.position.set(state.x, state.y, 0);
+    item.core.quaternion.copy(coreQ);
+    item.core.scale.setScalar(Math.max(0.001, size * 0.55));
+  }
+}
+
+
+const MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+const video = document.getElementById('cam');
+const fxCanvas = document.getElementById('fx');
+const skelCanvas = document.getElementById('skel');
+const skelCtx = skelCanvas.getContext('2d');
+const hint = document.getElementById('hint');
+const statusEl = document.getElementById('status');
+const legend = document.getElementById('legend');
+const legendList = document.getElementById('legend-list');
+const startBox = document.getElementById('start');
+const startBtn = document.getElementById('start-btn');
+const startMsg = document.getElementById('start-msg');
+
+let W = window.innerWidth;
+let H = window.innerHeight;
+
+const renderer = new THREE.WebGLRenderer({ canvas: fxCanvas, antialias: true });
+renderer.setClearColor(0x000000, 1);
+
+const scene = new THREE.Scene();
+const FOV = 40;
+const camera = new THREE.PerspectiveCamera(FOV, W / H, 10, 10000);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 1.15, 0.7, 0.0);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+const figures = new FigureSet(scene);
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  const pr = Math.min(window.devicePixelRatio || 1, 2);
+
+  renderer.setPixelRatio(pr);
+  renderer.setSize(W, H, false);
+  composer.setPixelRatio(pr);
+  composer.setSize(W, H);
+
+  camera.aspect = W / H;
+  camera.position.z = H / 2 / Math.tan((FOV / 2) * (Math.PI / 180));
+  camera.updateProjectionMatrix();
+
+  skelCanvas.width = W * pr;
+  skelCanvas.height = H * pr;
+  skelCtx.setTransform(pr, 0, 0, pr, 0, 0);
+
+  figures.resize(W, H, pr);
+}
+window.addEventListener('resize', resize);
+resize();
+
+legendList.innerHTML = FIGURES.slice()
+  .sort((a, b) => (a.count === 0 ? 6 : a.count) - (b.count === 0 ? 6 : b.count))
+  .map((f) => {
+    const hex = '#' + f.color.toString(16).padStart(6, '0');
+    const label = f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
+    return `<li data-count="${f.count}"><span class="dot" style="background:${hex}"></span>${label} — ${f.name.toLowerCase()}</li>`;
+  })
+  .join('');
+
+function pluralFingers(n) {
+  if (n === 1) return 'палец';
+  if (n >= 2 && n <= 4) return 'пальца';
+  return 'пальцев';
+}
+
+function markActive(count) {
+  legendList.querySelectorAll('li').forEach((li) => {
+    li.classList.toggle('active', Number(li.dataset.count) === count);
+  });
+}
+
+const target = {
+  x: 0,
+  y: 0,
+  quat: new THREE.Quaternion(),
+  seen: false,
+};
+const shown = {
+  x: 0,
+  y: 0,
+  quat: new THREE.Quaternion(),
+  scale: 1,
+  presence: 0,
+  size: 1,
+};
+let scaleTarget = 1;
+let hasLead = false;
+let hasSecond = false;
+let leadCount = null;
+let candidate = null;
+let candidateFrames = 0;
+let landmarker = null;
+
+function cover() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const s = Math.max(W / vw, H / vh);
+  return { vw, vh, s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
+}
+
+function pickHands(all) {
+  if (all.length === 1) return { lead: all[0], second: null };
+  const [a, b] = all;
+  return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
+}
+
+function onResult(res) {
+  skelCtx.clearRect(0, 0, W, H);
+  const all = res.landmarks || [];
+
+  if (all.length === 0) {
+    hasLead = false;
+    hasSecond = false;
+    return;
+  }
+
+  const c = cover();
+  const { lead, second } = pickHands(all);
+  const toScreen = (p) => ({
+    x: W - (c.ox + p.x * c.vw * c.s),
+    y: c.oy + p.y * c.vh * c.s,
+  });
+
+  const leadScreen = lead.map(toScreen);
+  drawHand(skelCtx, leadScreen, '#ffffff', false);
+  hasLead = true;
+
+  const leadPx = toPixels(lead, c.vw, c.vh);
+  const count = countFingers(leadPx);
+  if (count === candidate) {
+    candidateFrames++;
+  } else {
+    candidate = count;
+    candidateFrames = 1;
+  }
+  if (candidateFrames >= 4 && count !== leadCount) {
+    leadCount = count;
+    figures.setActive(count);
+    markActive(count);
+  }
+
+  let cx = 0;
+  let cy = 0;
+  for (const i of [0, 5, 9, 13, 17]) {
+    cx += leadScreen[i].x;
+    cy += leadScreen[i].y;
+  }
+  target.x = cx / 5 - W / 2;
+  target.y = H / 2 - cy / 5;
+
+  const P = (i) =>
+    new THREE.Vector3(
+      leadScreen[i].x,
+      -leadScreen[i].y,
+      -lead[i].z * c.vw * c.s
+    );
+  const yAxis = P(9).sub(P(0)).normalize();
+  const side = P(5).sub(P(17));
+  const xAxis = side.sub(yAxis.clone().multiplyScalar(side.dot(yAxis))).normalize();
+  const zAxis = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
+  const m = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+  target.quat.setFromRotationMatrix(m);
+  target.seen = true;
+
+  if (second) {
+    const secScreen = second.map(toScreen);
+    drawHand(skelCtx, secScreen, '#ff6b81', true);
+    const ratio = pinchRatio(toPixels(second, c.vw, c.vh));
+    scaleTarget = ratioToScale(ratio);
+    hasSecond = true;
+  } else {
+    hasSecond = false;
+  }
+}
+
+let lastTime = performance.now();
+let lastVideoTime = -1;
+let fpsFrames = 0;
+let fpsStamp = performance.now();
+let fps = 0;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    onResult(landmarker.detectForVideo(video, performance.now()));
+  }
+
+  const follow = 1 - Math.exp(-dt * 16);
+  if (target.seen) {
+    if (shown.presence < 0.02) {
+      shown.x = target.x;
+      shown.y = target.y;
+      shown.quat.copy(target.quat);
+    }
+    shown.x += (target.x - shown.x) * follow;
+    shown.y += (target.y - shown.y) * follow;
+    if (shown.quat.dot(target.quat) < 0) {
+      target.quat.set(-target.quat.x, -target.quat.y, -target.quat.z, -target.quat.w);
+    }
+    shown.quat.slerp(target.quat, 1 - Math.exp(-dt * 10));
+  }
+  shown.scale += (scaleTarget - shown.scale) * (1 - Math.exp(-dt * 8));
+  shown.size = Math.min(W, H) * 0.16;
+
+  const wantPresence = hasLead ? 1 : 0;
+  shown.presence += (wantPresence - shown.presence) * (1 - Math.exp(-dt * 10));
+
+  figures.update(dt, shown);
+  composer.render();
+
+  hint.hidden = hasLead;
+
+  fpsFrames++;
+  if (now - fpsStamp >= 500) {
+    fps = Math.round((fpsFrames * 1000) / (now - fpsStamp));
+    fpsFrames = 0;
+    fpsStamp = now;
+    const lead = hasLead && leadCount !== null ? leadCount : '—';
+    const second = hasSecond ? 'масштаб ×' + shown.scale.toFixed(2) : '—';
+    statusEl.textContent = `ведущая рука: ${lead} · вторая рука: ${second} · ${fps} fps`;
+  }
+}
+
+async function createLandmarker() {
+  const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm');
+  const options = (delegate) => ({
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  try {
+    return await HandLandmarker.createFromOptions(fileset, options('GPU'));
+  } catch (err) {
+    return await HandLandmarker.createFromOptions(fileset, options('CPU'));
+  }
+}
+
+function showError(text) {
+  startMsg.textContent = text;
+  startMsg.classList.add('error');
+  startBtn.disabled = false;
+  startBtn.textContent = 'Попробовать снова';
+}
+
+async function start() {
+  startBtn.disabled = true;
+  startMsg.classList.remove('error');
+  startMsg.textContent = 'Запускаю камеру…';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+  } catch (err) {
+    if (err && err.name === 'NotAllowedError') {
+      showError('Доступ к камере запрещён. Разрешите камеру в адресной строке браузера и нажмите кнопку ещё раз.');
+    } else if (err && err.name === 'NotFoundError') {
+      showError('Камера не найдена. Подключите камеру и нажмите кнопку ещё раз.');
+    } else {
+      showError('Не удалось включить камеру. Закройте другие программы, которые её используют, и попробуйте снова.');
+    }
+    return;
+  }
+
+  startMsg.textContent = 'Загружаю модель распознавания рук…';
+  try {
+    landmarker = await createLandmarker();
+  } catch (err) {
+    showError('Не удалось загрузить модель. Проверьте интернет и нажмите кнопку ещё раз.');
+    return;
+  }
+
+  startBox.classList.add('hidden');
+  legend.hidden = false;
+  hint.hidden = false;
+  resize();
+  requestAnimationFrame(frame);
+}
+
+startBtn.addEventListener('click', start);
+
+</script>
+</body>
+</html>
