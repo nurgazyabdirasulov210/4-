@@ -14,7 +14,7 @@
   --muted: #5b6b86;
   --accent: #2563eb;
   --accent-soft: #dbe7ff;
-  --panel: rgba(255, 255, 255, 0.88);
+  --panel: rgba(244, 247, 252, 0.94);
 }
 
 * { box-sizing: border-box; }
@@ -29,6 +29,7 @@ html, body {
 }
 
 #cam {
+  opacity: 0;
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -45,7 +46,7 @@ html, body {
   pointer-events: none;
 }
 
-#fx { mix-blend-mode: screen; }
+body.video-on #fx { mix-blend-mode: screen; }
 
 .hint {
   position: fixed;
@@ -78,7 +79,6 @@ html, body {
   padding: 14px 16px;
   border-radius: 14px;
   background: var(--panel);
-  backdrop-filter: blur(10px);
   box-shadow: 0 6px 24px rgba(20, 33, 61, 0.18);
   font-size: 13px;
   line-height: 1.45;
@@ -172,6 +172,24 @@ html, body {
   .legend ul { grid-template-columns: repeat(3, 1fr); }
 }
 
+.mode {
+  position: fixed;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .mode { top: auto; bottom: 86px; }
+}
+
 .toolbar {
   position: fixed;
   right: 16px;
@@ -193,7 +211,6 @@ html, body {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
-  backdrop-filter: blur(10px);
   box-shadow: 0 3px 12px rgba(20, 33, 61, 0.25);
 }
 
@@ -212,20 +229,25 @@ html, body {
   <canvas id="fx"></canvas>
   <canvas id="skel"></canvas>
 
+  <div id="mode" class="mode" hidden></div>
   <div id="hint" class="hint" hidden>Покажите руку в кадр</div>
   <div id="status" class="status"></div>
 
   <aside id="legend" class="legend" hidden>
     <ul id="legend-list"></ul>
     <p>Вторая рука: сводите и разводите большой и указательный пальцы, чтобы менять размер.</p>
-    <p>Поворачивайте ладонь, и фигура повернётся вместе с ней.</p>
+    <p>Раскройте ладонь второй руки, чтобы взять фигуру и перенести. Ближе к камере — больше, дальше — меньше. Сожмите пальцы, и фигура останется на месте.</p>
+    <p>Большой палец и мизинец («Y») или кнопка «К руке» вернут фигуру на ладонь.</p>
+    <p>Поворачивайте ведущую ладонь, и фигура повернётся вместе с ней.</p>
   </aside>
 
   <div id="toolbar" class="toolbar" hidden>
     <button id="btn-skel" type="button" aria-pressed="true">Скелет</button>
     <button id="btn-trail" type="button" aria-pressed="true">След</button>
     <button id="btn-glow" type="button" aria-pressed="true">Свечение</button>
+    <button id="btn-video" type="button" aria-pressed="false">Видео</button>
     <button id="btn-theme" type="button">Тема: Неон</button>
+    <button id="btn-attach" type="button">К руке</button>
     <button id="btn-flip" type="button">Камера</button>
     <button id="btn-shot" type="button">Снимок</button>
     <button id="btn-full" type="button">Экран</button>
@@ -262,7 +284,7 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 
 /* ---------- настройки ---------- */
 
-const settings = { skeleton: true, trail: true, glow: true, theme: 0 };
+const settings = { skeleton: true, trail: true, glow: true, theme: 0, video: false };
 try {
   Object.assign(settings, JSON.parse(localStorage.getItem('hand-figure') || '{}'));
 } catch (e) { /* без сохранения настроек тоже работает */ }
@@ -294,6 +316,12 @@ function countFingers(p) {
   if (thumbOut) count++;
 
   return count;
+}
+
+// Выпрямлен только средний палец
+function isMiddleFinger(p) {
+  const ext = (tip, joint) => dist(p[tip], p[0]) > dist(p[joint], p[0]) * 1.12;
+  return ext(12, 10) && !ext(8, 6) && !ext(16, 14) && !ext(20, 18);
 }
 
 function pinchRatio(p) {
@@ -398,6 +426,34 @@ function drawHand(ctx, pts, color, pinch) {
 
 /* ---------- фигуры и темы ---------- */
 
+// Рука со средним пальцем, собранная из параллелепипедов и пирамиды
+function handEdges() {
+  const parts = [
+    [new THREE.BoxGeometry(1.5, 1.0, 0.6), 0, -0.5, 0, 0],
+    [new THREE.BoxGeometry(0.34, 1.45, 0.34), -0.18, 0.72, 0, 0],
+    [new THREE.ConeGeometry(0.24, 0.35, 4), -0.18, 1.62, 0, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), -0.54, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), 0.18, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), 0.54, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.3, 0.7, 0.34), -0.98, -0.25, 0.1, -0.7],
+  ];
+  const arr = [];
+  for (const [g, x, y, z, rz] of parts) {
+    g.rotateZ(rz);
+    g.translate(x, y - 0.35, z);
+    g.scale(0.75, 0.75, 0.75);
+    const e = new THREE.EdgesGeometry(g, 5);
+    for (const v of e.attributes.position.array) arr.push(v);
+    g.dispose();
+    e.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  return out;
+}
+
+const MIDDLE = 99;
+
 const FIGURES = [
   { count: 1, name: 'Тетраэдр', color: 0x39e6ff, make: () => new THREE.TetrahedronGeometry(1.15) },
   { count: 2, name: 'Куб', color: 0x5dff8a, make: () => new THREE.BoxGeometry(1.5, 1.5, 1.5) },
@@ -405,6 +461,7 @@ const FIGURES = [
   { count: 4, name: 'Додекаэдр', color: 0xff8a2b, make: () => new THREE.DodecahedronGeometry(1.05) },
   { count: 5, name: 'Икосаэдр', color: 0xff4fb8, make: () => new THREE.IcosahedronGeometry(1.1) },
   { count: 0, name: 'Тор', color: 0xdfeaff, make: () => new THREE.TorusGeometry(0.95, 0.32, 10, 28) },
+  { count: MIDDLE, name: 'Средний палец', color: 0xff3b3b, edges: handEdges },
 ];
 
 const THEMES = [
@@ -443,9 +500,14 @@ class FigureSet {
     this.count = 0;
 
     for (const fig of FIGURES) {
-      const base = fig.make();
-      const edges = new THREE.EdgesGeometry(base, 5);
-      base.dispose();
+      let edges;
+      if (fig.edges) {
+        edges = fig.edges();
+      } else {
+        const base = fig.make();
+        edges = new THREE.EdgesGeometry(base, 5);
+        base.dispose();
+      }
 
       const group = new THREE.Group();
       group.visible = false;
@@ -689,11 +751,12 @@ const sparks = new Sparks(scene);
 // Уровни качества: если картинка тормозит, страница сама переходит на более лёгкий
 const dpr = window.devicePixelRatio || 1;
 const LEVELS = [
-  { pr: Math.min(dpr, 1.25), trail: TRAIL_MAX, bloom: true },
-  { pr: 1, trail: 5, bloom: true },
-  { pr: 0.8, trail: 3, bloom: false },
+  { pr: Math.min(dpr, 1), trail: TRAIL_MAX, bloom: true },
+  { pr: 0.75, trail: 5, bloom: true },
+  { pr: 0.6, trail: 3, bloom: false },
 ];
-let level = 0;
+// На больших экранах сразу начинаем с облегчённого режима
+let level = window.innerWidth * window.innerHeight * Math.min(dpr, 1) > 1.5e6 ? 1 : 0;
 
 function applyQuality() {
   const q = LEVELS[level];
@@ -743,8 +806,8 @@ function renderLegend() {
   legendList.innerHTML = FIGURES.slice()
     .sort((a, b) => (a.count === 0 ? 6 : a.count) - (b.count === 0 ? 6 : b.count))
     .map((f) => {
-      const label = f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
-      return `<li data-count="${f.count}"><span class="dot" style="background:${legendColor(f)}"></span>${label} — ${f.name.toLowerCase()}</li>`;
+      const label = f.count === MIDDLE ? 'Средний палец' : f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
+      return `<li data-count="${f.count}"><span class="dot" style="background:${legendColor(f)}"></span>${label}${f.count === MIDDLE ? '' : ' — ' + f.name.toLowerCase()}</li>`;
     })
     .join('');
   markActive(leadCount);
@@ -770,6 +833,19 @@ let landmarker = null;
 let facing = 'user';
 let mirror = true;
 
+// Закрепление: фигура остаётся там, где её отпустили, пока её не вернут к ведущей руке
+let pinned = false;
+const anchor = { x: 0, y: 0 };
+const grab = { active: false, ox: 0, oy: 0, palmBase: 1, scaleBase: 1 };
+let palmFrames = 0;
+let offFrames = 0;
+let backTime = 0;
+let secondMode = 'size';
+let lastLeadX = 0.7;
+let lastSecondX = 0.3;
+let lastSecondAt = -1e9;
+const sizeHist = [];
+
 const vY = new THREE.Vector3();
 const vSide = new THREE.Vector3();
 const vX = new THREE.Vector3();
@@ -784,10 +860,16 @@ function cover() {
   return { vw, vh, s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
 }
 
-function pickHands(all) {
-  if (all.length === 1) return { lead: all[0], second: null };
-  const [a, b] = all;
-  return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
+function pickHands(all, now) {
+  if (all.length >= 2) {
+    const [a, b] = all;
+    return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
+  }
+  // Одна рука в кадре: если фигуру держат второй рукой, а ведущая ушла, остаёмся второй рукой
+  const h = all[0];
+  const keepSecond = (grab.active || pinned) && now - lastSecondAt < 1000 &&
+    Math.abs(h[0].x - lastSecondX) < Math.abs(h[0].x - lastLeadX);
+  return keepSecond ? { lead: null, second: h } : { lead: h, second: null };
 }
 
 function toScreenFn(c) {
@@ -797,74 +879,190 @@ function toScreenFn(c) {
   });
 }
 
-function setP(out, pts, i) {
-  return out.set(pts[i].x, -pts[i].y, -pts[i].z);
+function palmCenter(pts) {
+  let cx = 0;
+  let cy = 0;
+  for (const i of [0, 5, 9, 13, 17]) {
+    cx += pts[i].x;
+    cy += pts[i].y;
+  }
+  return { x: cx / 5, y: cy / 5 };
+}
+
+// Позы второй руки. «Открытая ладонь» — все четыре пальца выпрямлены.
+// «Y» — выпрямлены только большой палец и мизинец.
+function secondPose(p) {
+  const palm = dist(p[0], p[9]) || 1;
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18];
+  const ext = tips.map((t, k) => dist(p[t], p[0]) > dist(p[pips[k]], p[0]) * 1.12);
+  const thumbOut =
+    dist(p[4], p[17]) > dist(p[3], p[17]) * 1.08 && dist(p[4], p[5]) > palm * 0.55;
+  const palmOpen = ext[0] && ext[1] && ext[2] && ext[3];
+  const shaka = thumbOut && !ext[0] && !ext[1] && !ext[2] && ext[3];
+  return { palmOpen, shaka };
+}
+
+function endGrab() {
+  grab.active = false;
+  palmFrames = 0;
+  offFrames = 0;
+  if (secondMode === 'move') secondMode = 'size';
+}
+
+function attachToHand() {
+  pinned = false;
+  endGrab();
+  backTime = 0;
+}
+
+function clampAnchor() {
+  anchor.x = Math.max(-W / 2, Math.min(W / 2, anchor.x));
+  anchor.y = Math.max(-H / 2, Math.min(H / 2, anchor.y));
+}
+
+function handleSecond(second, secondScreen, c, dt) {
+  const px = toPixels(second, c.vw, c.vh);
+  const pose = secondPose(px);
+  const pc = palmCenter(secondScreen);
+  const palmX = pc.x - W / 2;
+  const palmY = H / 2 - pc.y;
+  const palmLen = Math.hypot(px[0].x - px[9].x, px[0].y - px[9].y) || 1;
+
+  if (pose.palmOpen) { palmFrames++; offFrames = 0; } else { offFrames++; palmFrames = 0; }
+
+  if (!grab.active && palmFrames >= 5) {
+    // Берём фигуру: смещение запоминаем, чтобы она не прыгала к ладони
+    grab.active = true;
+    pinned = true;
+    secondMode = 'move';
+    anchor.x = shown.x;
+    anchor.y = shown.y;
+    grab.ox = anchor.x - palmX;
+    grab.oy = anchor.y - palmY;
+    grab.palmBase = palmLen;
+    // размер до того, как рука раскрылась
+    if (sizeHist.length) scaleTarget = sizeHist[0];
+    grab.scaleBase = scaleTarget;
+  } else if (grab.active && offFrames >= 5) {
+    endGrab();
+  }
+
+  if (grab.active) {
+    // Пока пальцы сжимаются, положение и размер замораживаем, чтобы фигура не уплывала
+    if (!pose.palmOpen) return finishSecond(pose, dt);
+    anchor.x = palmX + grab.ox;
+    anchor.y = palmY + grab.oy;
+    clampAnchor();
+    // Ближе к камере — больше, дальше — меньше
+    const k = Math.pow(palmLen / grab.palmBase, 1.5);
+    scaleTarget = Math.max(0.35, Math.min(3.2, grab.scaleBase * k));
+    if (settings.skeleton) {
+      skelCtx.strokeStyle = '#ffe14a';
+      skelCtx.lineWidth = 3;
+      skelCtx.beginPath();
+      skelCtx.arc(pc.x, pc.y, 30, 0, Math.PI * 2);
+      skelCtx.stroke();
+    }
+  } else {
+    secondMode = 'size';
+    scaleTarget = ratioToScale(pinchRatio(px));
+    sizeHist.push(scaleTarget);
+    if (sizeHist.length > 9) sizeHist.shift();
+  }
+
+  finishSecond(pose, dt);
+}
+
+// «Y» (большой палец и мизинец), если держать, возвращает фигуру к ведущей руке
+function finishSecond(pose, dt) {
+  if (pose.shaka && pinned) {
+    backTime += dt;
+    if (backTime > 0.6) attachToHand();
+  } else {
+    backTime = 0;
+  }
 }
 
 function onResult(res, dt) {
   skelCtx.clearRect(0, 0, W, H);
   const all = res.landmarks || [];
+  const now = performance.now();
 
   if (all.length === 0) {
     hasLead = false;
     hasSecond = false;
     leadFilter.reset();
     secondFilter.reset();
+    if (grab.active) endGrab();
     return;
   }
 
   const c = cover();
-  const picked = pickHands(all);
-  const lead = leadFilter.apply(picked.lead, dt);
+  const picked = pickHands(all, now);
   const toScreen = toScreenFn(c);
 
-  const leadScreen = lead.map(toScreen);
-  if (settings.skeleton) drawHand(skelCtx, leadScreen, '#ffffff', false);
-  hasLead = true;
+  if (picked.lead) {
+    lastLeadX = picked.lead[0].x;
+    const lead = leadFilter.apply(picked.lead, dt);
+    const leadScreen = lead.map(toScreen);
+    if (settings.skeleton) drawHand(skelCtx, leadScreen, '#ffffff', false);
+    hasLead = true;
 
-  const leadPx = toPixels(lead, c.vw, c.vh);
-  const count = countFingers(leadPx);
-  if (count === candidate) {
-    candidateFrames++;
-  } else {
-    candidate = count;
-    candidateFrames = 1;
-  }
-  if (candidateFrames >= 4 && count !== leadCount) {
-    leadCount = count;
-    if (figures.setActive(count)) {
-      sparks.burst(shown.x, shown.y, figures.currentColor(), shown.size * 1.6);
+    const leadPx = toPixels(lead, c.vw, c.vh);
+    const count = isMiddleFinger(leadPx) ? MIDDLE : countFingers(leadPx);
+    if (count === candidate) {
+      candidateFrames++;
+    } else {
+      candidate = count;
+      candidateFrames = 1;
     }
-    markActive(count);
-  }
+    if (candidateFrames >= 4 && count !== leadCount) {
+      leadCount = count;
+      if (figures.setActive(count)) {
+        sparks.burst(shown.x, shown.y, figures.currentColor(), shown.size * 1.6);
+      }
+      markActive(count);
+    }
 
-  let cx = 0;
-  let cy = 0;
-  for (const i of [0, 5, 9, 13, 17]) {
-    cx += leadScreen[i].x;
-    cy += leadScreen[i].y;
-  }
-  target.x = cx / 5 - W / 2;
-  target.y = H / 2 - cy / 5;
+    const pc = palmCenter(leadScreen);
+    if (!pinned) {
+      target.x = pc.x - W / 2;
+      target.y = H / 2 - pc.y;
+    }
 
-  const scale = c.vw * c.s;
-  const P = (out, i) => out.set(leadScreen[i].x, -leadScreen[i].y, -lead[i].z * scale);
-  P(vY, 9).sub(P(vTmp, 0)).normalize();
-  P(vSide, 5).sub(P(vTmp, 17));
-  vX.copy(vSide).sub(vTmp.copy(vY).multiplyScalar(vSide.dot(vY))).normalize();
-  vZ.crossVectors(vX, vY).normalize();
-  basis.makeBasis(vX, vY, vZ);
-  target.quat.setFromRotationMatrix(basis);
-  target.seen = true;
+    const scale = c.vw * c.s;
+    const P = (out, i) => out.set(leadScreen[i].x, -leadScreen[i].y, -lead[i].z * scale);
+    P(vY, 9).sub(P(vTmp, 0)).normalize();
+    P(vSide, 5).sub(P(vTmp, 17));
+    vX.copy(vSide).sub(vTmp.copy(vY).multiplyScalar(vSide.dot(vY))).normalize();
+    vZ.crossVectors(vX, vY).normalize();
+    basis.makeBasis(vX, vY, vZ);
+    target.quat.setFromRotationMatrix(basis);
+    target.seen = true;
+  } else {
+    hasLead = false;
+    leadFilter.reset();
+  }
 
   if (picked.second) {
+    lastSecondX = picked.second[0].x;
+    lastSecondAt = now;
     const second = secondFilter.apply(picked.second, dt);
-    if (settings.skeleton) drawHand(skelCtx, second.map(toScreen), '#ff6b81', true);
-    scaleTarget = ratioToScale(pinchRatio(toPixels(second, c.vw, c.vh)));
+    const secondScreen = second.map(toScreen);
+    if (settings.skeleton) drawHand(skelCtx, secondScreen, '#ff6b81', true);
     hasSecond = true;
+    handleSecond(second, secondScreen, c, dt);
   } else {
     secondFilter.reset();
     hasSecond = false;
+    if (grab.active) endGrab();
+    secondMode = 'size';
+  }
+
+  if (pinned) {
+    target.x = anchor.x;
+    target.y = anchor.y;
   }
 }
 
@@ -878,19 +1076,14 @@ let fpsStamp = performance.now();
 let fps = 0;
 let lowStreak = 0;
 let wantShot = false;
+let idleCleared = false;
 
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
 
-  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
-    const t = performance.now();
-    const dtDet = Math.min(Math.max((t - lastDetect) / 1000, 1 / 120), 0.1);
-    lastDetect = t;
-    onResult(landmarker.detectForVideo(video, t), dtDet);
-  }
+  pumpDetection();
 
   const follow = 1 - Math.exp(-dt * 16);
   if (target.seen) {
@@ -909,35 +1102,54 @@ function frame(now) {
   shown.scale += (scaleTarget - shown.scale) * (1 - Math.exp(-dt * 8));
   shown.size = Math.min(W, H) * 0.16;
 
-  const wantPresence = hasLead ? 1 : 0;
+  const wantPresence = hasLead || pinned ? 1 : 0;
   shown.presence += (wantPresence - shown.presence) * (1 - Math.exp(-dt * 10));
 
   figures.update(dt, shown, now / 1000);
   sparks.update(dt);
 
-  if (settings.glow && LEVELS[level].bloom) composer.render();
-  else renderer.render(scene, camera);
+  // Пока на экране ничего нет, не тратим время видеокарты
+  if (shown.presence > 0.01 || sparks.t > 0 || wantShot) {
+    idleCleared = false;
+    if (settings.glow && LEVELS[level].bloom) composer.render();
+    else renderer.render(scene, camera);
+  } else if (!idleCleared) {
+    renderer.clear();
+    idleCleared = true;
+  }
 
   if (wantShot) {
     wantShot = false;
     snapshot();
   }
 
-  hint.hidden = hasLead;
+  hint.hidden = hasLead || pinned;
+
+  let modeText = '';
+  if (grab.active) modeText = 'Перенос: ладонь открыта';
+  else if (hasSecond) modeText = pinned ? 'Размер · фигура закреплена' : 'Размер: пальцы второй руки';
+  else if (pinned) modeText = 'Фигура закреплена · «К руке» вернёт';
+  if (modeEl.textContent !== modeText) {
+    modeEl.textContent = modeText;
+    modeEl.hidden = modeText === '';
+  }
 
   fpsFrames++;
   if (now - fpsStamp >= 500) {
-    fps = Math.round((fpsFrames * 1000) / (now - fpsStamp));
+    const elapsed = now - fpsStamp;
+    fps = Math.round((fpsFrames * 1000) / elapsed);
+    detRate = Math.round((detCount * 1000) / elapsed);
     fpsFrames = 0;
+    detCount = 0;
     fpsStamp = now;
-    const leadText = hasLead && leadCount !== null ? leadCount : '—';
-    const second = hasSecond ? 'масштаб ×' + shown.scale.toFixed(2) : '—';
-    statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps`;
+    const leadText = hasLead && leadCount !== null ? (leadCount === MIDDLE ? 'средний палец' : leadCount) : '—';
+    const second = hasSecond ? (grab.active ? 'перенос' : 'размер') + ' ×' + shown.scale.toFixed(2) : '—';
+    statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps · распознавание ${detRate}/с (${detDelegate})`;
 
     // Автоматически упрощаем картинку, если fps долго низкий
-    if (!document.hidden && fps < 38 && level < LEVELS.length - 1) {
+    if (!document.hidden && fps < 45 && level < LEVELS.length - 1) {
       lowStreak++;
-      if (lowStreak >= 3) {
+      if (lowStreak >= 2) {
         lowStreak = 0;
         level++;
         applyQuality();
@@ -957,14 +1169,20 @@ function setPressed(btn, on) {
 const btnSkel = document.getElementById('btn-skel');
 const btnTrail = document.getElementById('btn-trail');
 const btnGlow = document.getElementById('btn-glow');
+const btnVideo = document.getElementById('btn-video');
 const btnTheme = document.getElementById('btn-theme');
 const btnFlip = document.getElementById('btn-flip');
+const btnAttach = document.getElementById('btn-attach');
+const modeEl = document.getElementById('mode');
 const btnShot = document.getElementById('btn-shot');
 const btnFull = document.getElementById('btn-full');
 
 setPressed(btnSkel, settings.skeleton);
 setPressed(btnTrail, settings.trail);
 setPressed(btnGlow, settings.glow);
+setPressed(btnVideo, settings.video);
+video.style.opacity = settings.video ? '1' : '0';
+document.body.classList.toggle('video-on', settings.video);
 btnTheme.textContent = 'Тема: ' + THEMES[settings.theme].name;
 figures.setTheme(settings.theme);
 applyQuality();
@@ -990,6 +1208,14 @@ btnGlow.addEventListener('click', () => {
   saveSettings();
 });
 
+btnVideo.addEventListener('click', () => {
+  settings.video = !settings.video;
+  setPressed(btnVideo, settings.video);
+  video.style.opacity = settings.video ? '1' : '0';
+  document.body.classList.toggle('video-on', settings.video);
+  saveSettings();
+});
+
 btnTheme.addEventListener('click', () => {
   settings.theme = (settings.theme + 1) % THEMES.length;
   figures.setTheme(settings.theme);
@@ -999,6 +1225,7 @@ btnTheme.addEventListener('click', () => {
 });
 
 btnShot.addEventListener('click', () => { wantShot = true; });
+btnAttach.addEventListener('click', attachToHand);
 
 if (document.documentElement.requestFullscreen) {
   btnFull.addEventListener('click', () => {
@@ -1020,13 +1247,15 @@ function snapshot() {
   ctx.fillRect(0, 0, out.width, out.height);
 
   const c = cover();
-  ctx.save();
-  if (mirror) {
-    ctx.translate(out.width, 0);
-    ctx.scale(-1, 1);
+  if (settings.video) {
+    ctx.save();
+    if (mirror) {
+      ctx.translate(out.width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, c.ox * k, c.oy * k, c.vw * c.s * k, c.vh * c.s * k);
+    ctx.restore();
   }
-  ctx.drawImage(video, c.ox * k, c.oy * k, c.vw * c.s * k, c.vh * c.s * k);
-  ctx.restore();
 
   ctx.globalCompositeOperation = 'screen';
   ctx.drawImage(fxCanvas, 0, 0, out.width, out.height);
@@ -1044,6 +1273,147 @@ function snapshot() {
 }
 
 /* ---------- камера и модель ---------- */
+
+// Распознавание рук идёт в отдельном потоке, чтобы не тормозить отрисовку
+const BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.cjs';
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm';
+
+function workerMain() {
+  let landmarker = null;
+  self.exports = {};
+  self.onmessage = async (e) => {
+    const m = e.data;
+    if (m.type === 'init') {
+      try {
+        // скачиваем и выполняем сами: так не зависим от типа файла на сервере
+        const code = await (await fetch(m.bundle)).text();
+        (0, eval)(code);
+        const { FilesetResolver, HandLandmarker } = self.exports;
+        const fileset = await FilesetResolver.forVisionTasks(m.wasm);
+        const opts = (delegate) => ({
+          baseOptions: { modelAssetPath: m.model, delegate },
+          runningMode: 'VIDEO',
+          numHands: 2,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        let delegate = 'GPU';
+        try {
+          landmarker = await HandLandmarker.createFromOptions(fileset, opts('GPU'));
+        } catch (err) {
+          delegate = 'CPU';
+          landmarker = await HandLandmarker.createFromOptions(fileset, opts('CPU'));
+        }
+        self.postMessage({ type: 'ready', delegate });
+      } catch (err) {
+        self.postMessage({ type: 'error', message: String((err && err.message) || err) });
+      }
+    } else if (m.type === 'frame') {
+      try {
+        const res = landmarker.detectForVideo(m.bitmap, m.ts);
+        self.postMessage({ type: 'result', landmarks: res.landmarks || [] });
+      } catch (err) {
+        self.postMessage({ type: 'frame-error' });
+      }
+      m.bitmap.close();
+    }
+  };
+}
+
+let worker = null;
+let workerBusy = false;
+let frameErrors = 0;
+let detDelegate = '';
+let detCount = 0;
+let detRate = 0;
+
+function deliver(landmarks) {
+  const t = performance.now();
+  const dtDet = Math.min(Math.max((t - lastDetect) / 1000, 1 / 120), 0.1);
+  lastDetect = t;
+  detCount++;
+  onResult({ landmarks }, dtDet);
+}
+
+async function fallbackToMain() {
+  if (worker) worker.terminate();
+  worker = null;
+  workerBusy = false;
+  detDelegate = 'основной поток';
+  try {
+    landmarker = await createLandmarker();
+  } catch (err) {
+    statusEl.textContent = 'Не удалось запустить распознавание рук';
+  }
+}
+
+function onWorkerMessage(e) {
+  const m = e.data;
+  if (m.type === 'result') {
+    workerBusy = false;
+    frameErrors = 0;
+    deliver(m.landmarks);
+  } else if (m.type === 'frame-error') {
+    workerBusy = false;
+    if (++frameErrors >= 5) fallbackToMain();
+  }
+}
+
+function initWorker() {
+  return new Promise((resolve, reject) => {
+    let w;
+    try {
+      const src = '(' + workerMain.toString() + ')()';
+      w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const timer = setTimeout(() => {
+      w.terminate();
+      reject(new Error('timeout'));
+    }, 40000);
+    w.onerror = (e) => {
+      clearTimeout(timer);
+      w.terminate();
+      reject(new Error(e.message || 'worker error'));
+    };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') {
+        clearTimeout(timer);
+        detDelegate = m.delegate;
+        w.onmessage = onWorkerMessage;
+        w.onerror = null;
+        resolve(w);
+      } else if (m.type === 'error') {
+        clearTimeout(timer);
+        w.terminate();
+        reject(new Error(m.message));
+      }
+    };
+    w.postMessage({ type: 'init', bundle: BUNDLE_URL, wasm: WASM_URL, model: MODEL_URL });
+  });
+}
+
+function pumpDetection() {
+  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  if (worker) {
+    if (workerBusy) return;
+    workerBusy = true;
+    lastVideoTime = video.currentTime;
+    const ts = performance.now();
+    const rw = Math.min(640, video.videoWidth);
+    const rh = Math.round((video.videoHeight * rw) / video.videoWidth);
+    createImageBitmap(video, { resizeWidth: rw, resizeHeight: rh, resizeQuality: 'low' })
+      .then((bmp) => worker && worker.postMessage({ type: 'frame', bitmap: bmp, ts }, [bmp]))
+      .catch(() => { workerBusy = false; });
+  } else if (landmarker) {
+    lastVideoTime = video.currentTime;
+    deliver(landmarker.detectForVideo(video, performance.now()).landmarks || []);
+  }
+}
 
 async function createLandmarker() {
   const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm');
@@ -1072,7 +1442,7 @@ function showError(text) {
 async function openCamera() {
   if (video.srcObject) video.srcObject.getTracks().forEach((t) => t.stop());
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    video: { facingMode: facing, width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 30 } },
     audio: false,
   });
   video.srcObject = stream;
@@ -1115,10 +1485,16 @@ async function start() {
 
   startMsg.textContent = 'Загружаю модель распознавания рук…';
   try {
-    landmarker = await createLandmarker();
+    worker = await initWorker();
   } catch (err) {
-    showError('Не удалось загрузить модель. Проверьте интернет и нажмите кнопку ещё раз.');
-    return;
+    worker = null;
+    detDelegate = 'основной поток';
+    try {
+      landmarker = await createLandmarker();
+    } catch (err2) {
+      showError('Не удалось загрузить модель. Проверьте интернет и нажмите кнопку ещё раз.');
+      return;
+    }
   }
 
   startBox.classList.add('hidden');
