@@ -172,6 +172,24 @@ html, body {
   .legend ul { grid-template-columns: repeat(3, 1fr); }
 }
 
+.mode {
+  position: fixed;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .mode { top: auto; bottom: 86px; }
+}
+
 .toolbar {
   position: fixed;
   right: 16px;
@@ -212,13 +230,16 @@ html, body {
   <canvas id="fx"></canvas>
   <canvas id="skel"></canvas>
 
+  <div id="mode" class="mode" hidden></div>
   <div id="hint" class="hint" hidden>Покажите руку в кадр</div>
   <div id="status" class="status"></div>
 
   <aside id="legend" class="legend" hidden>
     <ul id="legend-list"></ul>
     <p>Вторая рука: сводите и разводите большой и указательный пальцы, чтобы менять размер.</p>
-    <p>Поворачивайте ладонь, и фигура повернётся вместе с ней.</p>
+    <p>Раскройте ладонь второй руки, чтобы взять фигуру и перенести. Ближе к камере — больше, дальше — меньше. Сожмите пальцы, и фигура останется на месте.</p>
+    <p>Большой палец и мизинец («Y») или кнопка «К руке» вернут фигуру на ладонь.</p>
+    <p>Поворачивайте ведущую ладонь, и фигура повернётся вместе с ней.</p>
   </aside>
 
   <div id="toolbar" class="toolbar" hidden>
@@ -226,6 +247,7 @@ html, body {
     <button id="btn-trail" type="button" aria-pressed="true">След</button>
     <button id="btn-glow" type="button" aria-pressed="true">Свечение</button>
     <button id="btn-theme" type="button">Тема: Неон</button>
+    <button id="btn-attach" type="button">К руке</button>
     <button id="btn-flip" type="button">Камера</button>
     <button id="btn-shot" type="button">Снимок</button>
     <button id="btn-full" type="button">Экран</button>
@@ -770,6 +792,19 @@ let landmarker = null;
 let facing = 'user';
 let mirror = true;
 
+// Закрепление: фигура остаётся там, где её отпустили, пока её не вернут к ведущей руке
+let pinned = false;
+const anchor = { x: 0, y: 0 };
+const grab = { active: false, ox: 0, oy: 0, palmBase: 1, scaleBase: 1 };
+let palmFrames = 0;
+let offFrames = 0;
+let backTime = 0;
+let secondMode = 'size';
+let lastLeadX = 0.7;
+let lastSecondX = 0.3;
+let lastSecondAt = -1e9;
+const sizeHist = [];
+
 const vY = new THREE.Vector3();
 const vSide = new THREE.Vector3();
 const vX = new THREE.Vector3();
@@ -784,10 +819,16 @@ function cover() {
   return { vw, vh, s, ox: (W - vw * s) / 2, oy: (H - vh * s) / 2 };
 }
 
-function pickHands(all) {
-  if (all.length === 1) return { lead: all[0], second: null };
-  const [a, b] = all;
-  return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
+function pickHands(all, now) {
+  if (all.length >= 2) {
+    const [a, b] = all;
+    return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
+  }
+  // Одна рука в кадре: если фигуру держат второй рукой, а ведущая ушла, остаёмся второй рукой
+  const h = all[0];
+  const keepSecond = (grab.active || pinned) && now - lastSecondAt < 1000 &&
+    Math.abs(h[0].x - lastSecondX) < Math.abs(h[0].x - lastLeadX);
+  return keepSecond ? { lead: null, second: h } : { lead: h, second: null };
 }
 
 function toScreenFn(c) {
@@ -797,74 +838,190 @@ function toScreenFn(c) {
   });
 }
 
-function setP(out, pts, i) {
-  return out.set(pts[i].x, -pts[i].y, -pts[i].z);
+function palmCenter(pts) {
+  let cx = 0;
+  let cy = 0;
+  for (const i of [0, 5, 9, 13, 17]) {
+    cx += pts[i].x;
+    cy += pts[i].y;
+  }
+  return { x: cx / 5, y: cy / 5 };
+}
+
+// Позы второй руки. «Открытая ладонь» — все четыре пальца выпрямлены.
+// «Y» — выпрямлены только большой палец и мизинец.
+function secondPose(p) {
+  const palm = dist(p[0], p[9]) || 1;
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18];
+  const ext = tips.map((t, k) => dist(p[t], p[0]) > dist(p[pips[k]], p[0]) * 1.12);
+  const thumbOut =
+    dist(p[4], p[17]) > dist(p[3], p[17]) * 1.08 && dist(p[4], p[5]) > palm * 0.55;
+  const palmOpen = ext[0] && ext[1] && ext[2] && ext[3];
+  const shaka = thumbOut && !ext[0] && !ext[1] && !ext[2] && ext[3];
+  return { palmOpen, shaka };
+}
+
+function endGrab() {
+  grab.active = false;
+  palmFrames = 0;
+  offFrames = 0;
+  if (secondMode === 'move') secondMode = 'size';
+}
+
+function attachToHand() {
+  pinned = false;
+  endGrab();
+  backTime = 0;
+}
+
+function clampAnchor() {
+  anchor.x = Math.max(-W / 2, Math.min(W / 2, anchor.x));
+  anchor.y = Math.max(-H / 2, Math.min(H / 2, anchor.y));
+}
+
+function handleSecond(second, secondScreen, c, dt) {
+  const px = toPixels(second, c.vw, c.vh);
+  const pose = secondPose(px);
+  const pc = palmCenter(secondScreen);
+  const palmX = pc.x - W / 2;
+  const palmY = H / 2 - pc.y;
+  const palmLen = Math.hypot(px[0].x - px[9].x, px[0].y - px[9].y) || 1;
+
+  if (pose.palmOpen) { palmFrames++; offFrames = 0; } else { offFrames++; palmFrames = 0; }
+
+  if (!grab.active && palmFrames >= 5) {
+    // Берём фигуру: смещение запоминаем, чтобы она не прыгала к ладони
+    grab.active = true;
+    pinned = true;
+    secondMode = 'move';
+    anchor.x = shown.x;
+    anchor.y = shown.y;
+    grab.ox = anchor.x - palmX;
+    grab.oy = anchor.y - palmY;
+    grab.palmBase = palmLen;
+    // размер до того, как рука раскрылась
+    if (sizeHist.length) scaleTarget = sizeHist[0];
+    grab.scaleBase = scaleTarget;
+  } else if (grab.active && offFrames >= 5) {
+    endGrab();
+  }
+
+  if (grab.active) {
+    // Пока пальцы сжимаются, положение и размер замораживаем, чтобы фигура не уплывала
+    if (!pose.palmOpen) return finishSecond(pose, dt);
+    anchor.x = palmX + grab.ox;
+    anchor.y = palmY + grab.oy;
+    clampAnchor();
+    // Ближе к камере — больше, дальше — меньше
+    const k = Math.pow(palmLen / grab.palmBase, 1.5);
+    scaleTarget = Math.max(0.35, Math.min(3.2, grab.scaleBase * k));
+    if (settings.skeleton) {
+      skelCtx.strokeStyle = '#ffe14a';
+      skelCtx.lineWidth = 3;
+      skelCtx.beginPath();
+      skelCtx.arc(pc.x, pc.y, 30, 0, Math.PI * 2);
+      skelCtx.stroke();
+    }
+  } else {
+    secondMode = 'size';
+    scaleTarget = ratioToScale(pinchRatio(px));
+    sizeHist.push(scaleTarget);
+    if (sizeHist.length > 9) sizeHist.shift();
+  }
+
+  finishSecond(pose, dt);
+}
+
+// «Y» (большой палец и мизинец), если держать, возвращает фигуру к ведущей руке
+function finishSecond(pose, dt) {
+  if (pose.shaka && pinned) {
+    backTime += dt;
+    if (backTime > 0.6) attachToHand();
+  } else {
+    backTime = 0;
+  }
 }
 
 function onResult(res, dt) {
   skelCtx.clearRect(0, 0, W, H);
   const all = res.landmarks || [];
+  const now = performance.now();
 
   if (all.length === 0) {
     hasLead = false;
     hasSecond = false;
     leadFilter.reset();
     secondFilter.reset();
+    if (grab.active) endGrab();
     return;
   }
 
   const c = cover();
-  const picked = pickHands(all);
-  const lead = leadFilter.apply(picked.lead, dt);
+  const picked = pickHands(all, now);
   const toScreen = toScreenFn(c);
 
-  const leadScreen = lead.map(toScreen);
-  if (settings.skeleton) drawHand(skelCtx, leadScreen, '#ffffff', false);
-  hasLead = true;
+  if (picked.lead) {
+    lastLeadX = picked.lead[0].x;
+    const lead = leadFilter.apply(picked.lead, dt);
+    const leadScreen = lead.map(toScreen);
+    if (settings.skeleton) drawHand(skelCtx, leadScreen, '#ffffff', false);
+    hasLead = true;
 
-  const leadPx = toPixels(lead, c.vw, c.vh);
-  const count = countFingers(leadPx);
-  if (count === candidate) {
-    candidateFrames++;
-  } else {
-    candidate = count;
-    candidateFrames = 1;
-  }
-  if (candidateFrames >= 4 && count !== leadCount) {
-    leadCount = count;
-    if (figures.setActive(count)) {
-      sparks.burst(shown.x, shown.y, figures.currentColor(), shown.size * 1.6);
+    const leadPx = toPixels(lead, c.vw, c.vh);
+    const count = countFingers(leadPx);
+    if (count === candidate) {
+      candidateFrames++;
+    } else {
+      candidate = count;
+      candidateFrames = 1;
     }
-    markActive(count);
-  }
+    if (candidateFrames >= 4 && count !== leadCount) {
+      leadCount = count;
+      if (figures.setActive(count)) {
+        sparks.burst(shown.x, shown.y, figures.currentColor(), shown.size * 1.6);
+      }
+      markActive(count);
+    }
 
-  let cx = 0;
-  let cy = 0;
-  for (const i of [0, 5, 9, 13, 17]) {
-    cx += leadScreen[i].x;
-    cy += leadScreen[i].y;
-  }
-  target.x = cx / 5 - W / 2;
-  target.y = H / 2 - cy / 5;
+    const pc = palmCenter(leadScreen);
+    if (!pinned) {
+      target.x = pc.x - W / 2;
+      target.y = H / 2 - pc.y;
+    }
 
-  const scale = c.vw * c.s;
-  const P = (out, i) => out.set(leadScreen[i].x, -leadScreen[i].y, -lead[i].z * scale);
-  P(vY, 9).sub(P(vTmp, 0)).normalize();
-  P(vSide, 5).sub(P(vTmp, 17));
-  vX.copy(vSide).sub(vTmp.copy(vY).multiplyScalar(vSide.dot(vY))).normalize();
-  vZ.crossVectors(vX, vY).normalize();
-  basis.makeBasis(vX, vY, vZ);
-  target.quat.setFromRotationMatrix(basis);
-  target.seen = true;
+    const scale = c.vw * c.s;
+    const P = (out, i) => out.set(leadScreen[i].x, -leadScreen[i].y, -lead[i].z * scale);
+    P(vY, 9).sub(P(vTmp, 0)).normalize();
+    P(vSide, 5).sub(P(vTmp, 17));
+    vX.copy(vSide).sub(vTmp.copy(vY).multiplyScalar(vSide.dot(vY))).normalize();
+    vZ.crossVectors(vX, vY).normalize();
+    basis.makeBasis(vX, vY, vZ);
+    target.quat.setFromRotationMatrix(basis);
+    target.seen = true;
+  } else {
+    hasLead = false;
+    leadFilter.reset();
+  }
 
   if (picked.second) {
+    lastSecondX = picked.second[0].x;
+    lastSecondAt = now;
     const second = secondFilter.apply(picked.second, dt);
-    if (settings.skeleton) drawHand(skelCtx, second.map(toScreen), '#ff6b81', true);
-    scaleTarget = ratioToScale(pinchRatio(toPixels(second, c.vw, c.vh)));
+    const secondScreen = second.map(toScreen);
+    if (settings.skeleton) drawHand(skelCtx, secondScreen, '#ff6b81', true);
     hasSecond = true;
+    handleSecond(second, secondScreen, c, dt);
   } else {
     secondFilter.reset();
     hasSecond = false;
+    if (grab.active) endGrab();
+    secondMode = 'size';
+  }
+
+  if (pinned) {
+    target.x = anchor.x;
+    target.y = anchor.y;
   }
 }
 
@@ -909,7 +1066,7 @@ function frame(now) {
   shown.scale += (scaleTarget - shown.scale) * (1 - Math.exp(-dt * 8));
   shown.size = Math.min(W, H) * 0.16;
 
-  const wantPresence = hasLead ? 1 : 0;
+  const wantPresence = hasLead || pinned ? 1 : 0;
   shown.presence += (wantPresence - shown.presence) * (1 - Math.exp(-dt * 10));
 
   figures.update(dt, shown, now / 1000);
@@ -923,7 +1080,16 @@ function frame(now) {
     snapshot();
   }
 
-  hint.hidden = hasLead;
+  hint.hidden = hasLead || pinned;
+
+  let modeText = '';
+  if (grab.active) modeText = 'Перенос: ладонь открыта';
+  else if (hasSecond) modeText = pinned ? 'Размер · фигура закреплена' : 'Размер: пальцы второй руки';
+  else if (pinned) modeText = 'Фигура закреплена · «К руке» вернёт';
+  if (modeEl.textContent !== modeText) {
+    modeEl.textContent = modeText;
+    modeEl.hidden = modeText === '';
+  }
 
   fpsFrames++;
   if (now - fpsStamp >= 500) {
@@ -931,7 +1097,7 @@ function frame(now) {
     fpsFrames = 0;
     fpsStamp = now;
     const leadText = hasLead && leadCount !== null ? leadCount : '—';
-    const second = hasSecond ? 'масштаб ×' + shown.scale.toFixed(2) : '—';
+    const second = hasSecond ? (grab.active ? 'перенос' : 'размер') + ' ×' + shown.scale.toFixed(2) : '—';
     statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps`;
 
     // Автоматически упрощаем картинку, если fps долго низкий
@@ -959,6 +1125,8 @@ const btnTrail = document.getElementById('btn-trail');
 const btnGlow = document.getElementById('btn-glow');
 const btnTheme = document.getElementById('btn-theme');
 const btnFlip = document.getElementById('btn-flip');
+const btnAttach = document.getElementById('btn-attach');
+const modeEl = document.getElementById('mode');
 const btnShot = document.getElementById('btn-shot');
 const btnFull = document.getElementById('btn-full');
 
@@ -999,6 +1167,7 @@ btnTheme.addEventListener('click', () => {
 });
 
 btnShot.addEventListener('click', () => { wantShot = true; });
+btnAttach.addEventListener('click', attachToHand);
 
 if (document.documentElement.requestFullscreen) {
   btnFull.addEventListener('click', () => {
