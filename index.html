@@ -14,7 +14,7 @@
   --muted: #5b6b86;
   --accent: #2563eb;
   --accent-soft: #dbe7ff;
-  --panel: rgba(255, 255, 255, 0.88);
+  --panel: rgba(244, 247, 252, 0.94);
 }
 
 * { box-sizing: border-box; }
@@ -46,7 +46,7 @@ html, body {
   pointer-events: none;
 }
 
-#fx { mix-blend-mode: screen; }
+body.video-on #fx { mix-blend-mode: screen; }
 
 .hint {
   position: fixed;
@@ -79,7 +79,6 @@ html, body {
   padding: 14px 16px;
   border-radius: 14px;
   background: var(--panel);
-  backdrop-filter: blur(10px);
   box-shadow: 0 6px 24px rgba(20, 33, 61, 0.18);
   font-size: 13px;
   line-height: 1.45;
@@ -212,7 +211,6 @@ html, body {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
-  backdrop-filter: blur(10px);
   box-shadow: 0 3px 12px rgba(20, 33, 61, 0.25);
 }
 
@@ -753,11 +751,12 @@ const sparks = new Sparks(scene);
 // Уровни качества: если картинка тормозит, страница сама переходит на более лёгкий
 const dpr = window.devicePixelRatio || 1;
 const LEVELS = [
-  { pr: Math.min(dpr, 1.25), trail: TRAIL_MAX, bloom: true },
-  { pr: 1, trail: 5, bloom: true },
-  { pr: 0.8, trail: 3, bloom: false },
+  { pr: Math.min(dpr, 1), trail: TRAIL_MAX, bloom: true },
+  { pr: 0.75, trail: 5, bloom: true },
+  { pr: 0.6, trail: 3, bloom: false },
 ];
-let level = 0;
+// На больших экранах сразу начинаем с облегчённого режима
+let level = window.innerWidth * window.innerHeight * Math.min(dpr, 1) > 1.5e6 ? 1 : 0;
 
 function applyQuality() {
   const q = LEVELS[level];
@@ -1077,19 +1076,14 @@ let fpsStamp = performance.now();
 let fps = 0;
 let lowStreak = 0;
 let wantShot = false;
+let idleCleared = false;
 
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
 
-  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
-    const t = performance.now();
-    const dtDet = Math.min(Math.max((t - lastDetect) / 1000, 1 / 120), 0.1);
-    lastDetect = t;
-    onResult(landmarker.detectForVideo(video, t), dtDet);
-  }
+  pumpDetection();
 
   const follow = 1 - Math.exp(-dt * 16);
   if (target.seen) {
@@ -1114,8 +1108,15 @@ function frame(now) {
   figures.update(dt, shown, now / 1000);
   sparks.update(dt);
 
-  if (settings.glow && LEVELS[level].bloom) composer.render();
-  else renderer.render(scene, camera);
+  // Пока на экране ничего нет, не тратим время видеокарты
+  if (shown.presence > 0.01 || sparks.t > 0 || wantShot) {
+    idleCleared = false;
+    if (settings.glow && LEVELS[level].bloom) composer.render();
+    else renderer.render(scene, camera);
+  } else if (!idleCleared) {
+    renderer.clear();
+    idleCleared = true;
+  }
 
   if (wantShot) {
     wantShot = false;
@@ -1135,17 +1136,20 @@ function frame(now) {
 
   fpsFrames++;
   if (now - fpsStamp >= 500) {
-    fps = Math.round((fpsFrames * 1000) / (now - fpsStamp));
+    const elapsed = now - fpsStamp;
+    fps = Math.round((fpsFrames * 1000) / elapsed);
+    detRate = Math.round((detCount * 1000) / elapsed);
     fpsFrames = 0;
+    detCount = 0;
     fpsStamp = now;
     const leadText = hasLead && leadCount !== null ? (leadCount === MIDDLE ? 'средний палец' : leadCount) : '—';
     const second = hasSecond ? (grab.active ? 'перенос' : 'размер') + ' ×' + shown.scale.toFixed(2) : '—';
-    statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps`;
+    statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps · распознавание ${detRate}/с (${detDelegate})`;
 
     // Автоматически упрощаем картинку, если fps долго низкий
-    if (!document.hidden && fps < 38 && level < LEVELS.length - 1) {
+    if (!document.hidden && fps < 45 && level < LEVELS.length - 1) {
       lowStreak++;
-      if (lowStreak >= 3) {
+      if (lowStreak >= 2) {
         lowStreak = 0;
         level++;
         applyQuality();
@@ -1178,6 +1182,7 @@ setPressed(btnTrail, settings.trail);
 setPressed(btnGlow, settings.glow);
 setPressed(btnVideo, settings.video);
 video.style.opacity = settings.video ? '1' : '0';
+document.body.classList.toggle('video-on', settings.video);
 btnTheme.textContent = 'Тема: ' + THEMES[settings.theme].name;
 figures.setTheme(settings.theme);
 applyQuality();
@@ -1207,6 +1212,7 @@ btnVideo.addEventListener('click', () => {
   settings.video = !settings.video;
   setPressed(btnVideo, settings.video);
   video.style.opacity = settings.video ? '1' : '0';
+  document.body.classList.toggle('video-on', settings.video);
   saveSettings();
 });
 
@@ -1268,6 +1274,147 @@ function snapshot() {
 
 /* ---------- камера и модель ---------- */
 
+// Распознавание рук идёт в отдельном потоке, чтобы не тормозить отрисовку
+const BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.cjs';
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm';
+
+function workerMain() {
+  let landmarker = null;
+  self.exports = {};
+  self.onmessage = async (e) => {
+    const m = e.data;
+    if (m.type === 'init') {
+      try {
+        // скачиваем и выполняем сами: так не зависим от типа файла на сервере
+        const code = await (await fetch(m.bundle)).text();
+        (0, eval)(code);
+        const { FilesetResolver, HandLandmarker } = self.exports;
+        const fileset = await FilesetResolver.forVisionTasks(m.wasm);
+        const opts = (delegate) => ({
+          baseOptions: { modelAssetPath: m.model, delegate },
+          runningMode: 'VIDEO',
+          numHands: 2,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        let delegate = 'GPU';
+        try {
+          landmarker = await HandLandmarker.createFromOptions(fileset, opts('GPU'));
+        } catch (err) {
+          delegate = 'CPU';
+          landmarker = await HandLandmarker.createFromOptions(fileset, opts('CPU'));
+        }
+        self.postMessage({ type: 'ready', delegate });
+      } catch (err) {
+        self.postMessage({ type: 'error', message: String((err && err.message) || err) });
+      }
+    } else if (m.type === 'frame') {
+      try {
+        const res = landmarker.detectForVideo(m.bitmap, m.ts);
+        self.postMessage({ type: 'result', landmarks: res.landmarks || [] });
+      } catch (err) {
+        self.postMessage({ type: 'frame-error' });
+      }
+      m.bitmap.close();
+    }
+  };
+}
+
+let worker = null;
+let workerBusy = false;
+let frameErrors = 0;
+let detDelegate = '';
+let detCount = 0;
+let detRate = 0;
+
+function deliver(landmarks) {
+  const t = performance.now();
+  const dtDet = Math.min(Math.max((t - lastDetect) / 1000, 1 / 120), 0.1);
+  lastDetect = t;
+  detCount++;
+  onResult({ landmarks }, dtDet);
+}
+
+async function fallbackToMain() {
+  if (worker) worker.terminate();
+  worker = null;
+  workerBusy = false;
+  detDelegate = 'основной поток';
+  try {
+    landmarker = await createLandmarker();
+  } catch (err) {
+    statusEl.textContent = 'Не удалось запустить распознавание рук';
+  }
+}
+
+function onWorkerMessage(e) {
+  const m = e.data;
+  if (m.type === 'result') {
+    workerBusy = false;
+    frameErrors = 0;
+    deliver(m.landmarks);
+  } else if (m.type === 'frame-error') {
+    workerBusy = false;
+    if (++frameErrors >= 5) fallbackToMain();
+  }
+}
+
+function initWorker() {
+  return new Promise((resolve, reject) => {
+    let w;
+    try {
+      const src = '(' + workerMain.toString() + ')()';
+      w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const timer = setTimeout(() => {
+      w.terminate();
+      reject(new Error('timeout'));
+    }, 40000);
+    w.onerror = (e) => {
+      clearTimeout(timer);
+      w.terminate();
+      reject(new Error(e.message || 'worker error'));
+    };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') {
+        clearTimeout(timer);
+        detDelegate = m.delegate;
+        w.onmessage = onWorkerMessage;
+        w.onerror = null;
+        resolve(w);
+      } else if (m.type === 'error') {
+        clearTimeout(timer);
+        w.terminate();
+        reject(new Error(m.message));
+      }
+    };
+    w.postMessage({ type: 'init', bundle: BUNDLE_URL, wasm: WASM_URL, model: MODEL_URL });
+  });
+}
+
+function pumpDetection() {
+  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  if (worker) {
+    if (workerBusy) return;
+    workerBusy = true;
+    lastVideoTime = video.currentTime;
+    const ts = performance.now();
+    const rw = Math.min(640, video.videoWidth);
+    const rh = Math.round((video.videoHeight * rw) / video.videoWidth);
+    createImageBitmap(video, { resizeWidth: rw, resizeHeight: rh, resizeQuality: 'low' })
+      .then((bmp) => worker && worker.postMessage({ type: 'frame', bitmap: bmp, ts }, [bmp]))
+      .catch(() => { workerBusy = false; });
+  } else if (landmarker) {
+    lastVideoTime = video.currentTime;
+    deliver(landmarker.detectForVideo(video, performance.now()).landmarks || []);
+  }
+}
+
 async function createLandmarker() {
   const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm');
   const options = (delegate) => ({
@@ -1295,7 +1442,7 @@ function showError(text) {
 async function openCamera() {
   if (video.srcObject) video.srcObject.getTracks().forEach((t) => t.stop());
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    video: { facingMode: facing, width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 30 } },
     audio: false,
   });
   video.srcObject = stream;
@@ -1338,10 +1485,16 @@ async function start() {
 
   startMsg.textContent = 'Загружаю модель распознавания рук…';
   try {
-    landmarker = await createLandmarker();
+    worker = await initWorker();
   } catch (err) {
-    showError('Не удалось загрузить модель. Проверьте интернет и нажмите кнопку ещё раз.');
-    return;
+    worker = null;
+    detDelegate = 'основной поток';
+    try {
+      landmarker = await createLandmarker();
+    } catch (err2) {
+      showError('Не удалось загрузить модель. Проверьте интернет и нажмите кнопку ещё раз.');
+      return;
+    }
   }
 
   startBox.classList.add('hidden');
