@@ -171,6 +171,40 @@ html, body {
   .legend p { display: none; }
   .legend ul { grid-template-columns: repeat(3, 1fr); }
 }
+
+.toolbar {
+  position: fixed;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  max-width: calc(100vw - 32px);
+}
+
+.toolbar button {
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 3px 12px rgba(20, 33, 61, 0.25);
+}
+
+.toolbar button[aria-pressed="false"] { opacity: 0.55; }
+.toolbar button:hover { background: #fff; }
+.toolbar button:focus-visible { outline: 3px solid #93b4fb; outline-offset: 2px; }
+
+@media (max-width: 700px) {
+  .toolbar { left: 12px; right: 12px; bottom: 34px; justify-content: center; }
+  .toolbar button { padding: 8px 10px; font-size: 12px; }
+}
 </style>
 </head>
 <body>
@@ -186,6 +220,16 @@ html, body {
     <p>Вторая рука: сводите и разводите большой и указательный пальцы, чтобы менять размер.</p>
     <p>Поворачивайте ладонь, и фигура повернётся вместе с ней.</p>
   </aside>
+
+  <div id="toolbar" class="toolbar" hidden>
+    <button id="btn-skel" type="button" aria-pressed="true">Скелет</button>
+    <button id="btn-trail" type="button" aria-pressed="true">След</button>
+    <button id="btn-glow" type="button" aria-pressed="true">Свечение</button>
+    <button id="btn-theme" type="button">Тема: Неон</button>
+    <button id="btn-flip" type="button">Камера</button>
+    <button id="btn-shot" type="button">Снимок</button>
+    <button id="btn-full" type="button">Экран</button>
+  </div>
 
   <section id="start" class="start">
     <div class="card">
@@ -215,6 +259,20 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+/* ---------- настройки ---------- */
+
+const settings = { skeleton: true, trail: true, glow: true, theme: 0 };
+try {
+  Object.assign(settings, JSON.parse(localStorage.getItem('hand-figure') || '{}'));
+} catch (e) { /* без сохранения настроек тоже работает */ }
+
+function saveSettings() {
+  try { localStorage.setItem('hand-figure', JSON.stringify(settings)); } catch (e) { /* ignore */ }
+}
+
+/* ---------- распознавание жестов ---------- */
+
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
 function toPixels(landmarks, vw, vh) {
@@ -248,6 +306,56 @@ function ratioToScale(ratio) {
   return 0.35 + t * 2.85;
 }
 
+/* ---------- сглаживание точек руки (One Euro filter) ---------- */
+
+const smoothAlpha = (cutoff, dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff) / dt);
+
+class OneEuro {
+  constructor(minCutoff, beta) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.x = null;
+    this.dx = 0;
+  }
+
+  filter(v, dt) {
+    if (this.x === null) {
+      this.x = v;
+      return v;
+    }
+    this.dx += ((v - this.x) / dt - this.dx) * smoothAlpha(1, dt);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += (v - this.x) * smoothAlpha(cutoff, dt);
+    return this.x;
+  }
+}
+
+class HandFilter {
+  constructor() {
+    this.f = Array.from({ length: 63 }, () => new OneEuro(1.6, 9));
+    this.out = Array.from({ length: 21 }, () => ({ x: 0, y: 0, z: 0 }));
+  }
+
+  reset() {
+    for (const f of this.f) f.x = null;
+  }
+
+  apply(lm, dt) {
+    for (let i = 0; i < 21; i++) {
+      const o = this.out[i];
+      o.x = this.f[i * 3].filter(lm[i].x, dt);
+      o.y = this.f[i * 3 + 1].filter(lm[i].y, dt);
+      o.z = this.f[i * 3 + 2].filter(lm[i].z, dt);
+    }
+    return this.out;
+  }
+}
+
+const leadFilter = new HandFilter();
+const secondFilter = new HandFilter();
+
+/* ---------- скелет руки ---------- */
+
 const LINKS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -270,11 +378,12 @@ function drawHand(ctx, pts, color, pinch) {
   }
   ctx.stroke();
 
+  ctx.beginPath();
   for (const p of pts) {
-    ctx.beginPath();
+    ctx.moveTo(p.x + 2.5, p.y);
     ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-    ctx.fill();
   }
+  ctx.fill();
 
   if (pinch) {
     ctx.strokeStyle = '#6aa3ff';
@@ -287,6 +396,7 @@ function drawHand(ctx, pts, color, pinch) {
   ctx.globalAlpha = 1;
 }
 
+/* ---------- фигуры и темы ---------- */
 
 const FIGURES = [
   { count: 1, name: 'Тетраэдр', color: 0x39e6ff, make: () => new THREE.TetrahedronGeometry(1.15) },
@@ -297,8 +407,21 @@ const FIGURES = [
   { count: 0, name: 'Тор', color: 0xdfeaff, make: () => new THREE.TorusGeometry(0.95, 0.32, 10, 28) },
 ];
 
-const TRAIL = 6;
+const THEMES = [
+  { name: 'Неон', color: (f) => f.color },
+  { name: 'Огонь', color: () => 0xff6a1a },
+  { name: 'Лёд', color: () => 0x6fd8ff },
+  { name: 'Радуга', rainbow: true, color: (f) => f.color },
+];
+
+const TRAIL_MAX = 8;
 const TRAIL_STEP = 3;
+const HIST = TRAIL_MAX * TRAIL_STEP + 2;
+
+const tmpQ = new THREE.Quaternion();
+const spinQ = new THREE.Quaternion();
+const spinAxis = new THREE.Vector3(0.3, 1, 0.2).normalize();
+const tmpColor = new THREE.Color();
 
 function easeOutBack(t) {
   const c1 = 1.70158;
@@ -311,72 +434,119 @@ class FigureSet {
     this.items = new Map();
     this.active = null;
     this.pop = 1;
-    this.pixelRatio = 1;
-    this.history = [];
     this.idle = 0;
+    this.trailLen = TRAIL_MAX;
+    this.themeIndex = 0;
+
+    this.hist = Array.from({ length: HIST }, () => ({ x: 0, y: 0, s: 0, q: new THREE.Quaternion() }));
+    this.head = 0;
+    this.count = 0;
 
     for (const fig of FIGURES) {
       const base = fig.make();
       const edges = new THREE.EdgesGeometry(base, 5);
-      const lineGeo = new LineSegmentsGeometry().fromEdgesGeometry(edges);
+      base.dispose();
 
       const group = new THREE.Group();
       group.visible = false;
-      const layers = [];
 
-      for (let i = 0; i <= TRAIL; i++) {
-        const mat = new LineMaterial({
-          color: fig.color,
-          linewidth: i === 0 ? 3.2 : 2,
-          transparent: true,
-          opacity: i === 0 ? 1 : 0.5 * (1 - i / (TRAIL + 1)),
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-          depthTest: false,
-        });
-        mat.userData.baseWidth = i === 0 ? 3.2 : 2;
-        const line = new LineSegments2(lineGeo, mat);
-        group.add(line);
-        layers.push(line);
-      }
-
-      const coreMat = new LineMaterial({
-        color: 0xffffff,
-        linewidth: 1.4,
+      const mainMat = new LineMaterial({
+        color: fig.color,
+        linewidth: 3.2,
         transparent: true,
-        opacity: 0.35,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         depthTest: false,
       });
-      coreMat.userData.baseWidth = 1.4;
-      const core = new LineSegments2(lineGeo, coreMat);
+      mainMat.userData.baseWidth = 3.2;
+      const main = new LineSegments2(new LineSegmentsGeometry().fromEdgesGeometry(edges), mainMat);
+      group.add(main);
+
+      // След рисуем обычными тонкими линиями: они в разы дешевле толстых
+      const trail = [];
+      for (let i = 1; i <= TRAIL_MAX; i++) {
+        const mat = new THREE.LineBasicMaterial({
+          color: fig.color,
+          transparent: true,
+          opacity: 0.6 * (1 - (i - 1) / TRAIL_MAX),
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: false,
+        });
+        const line = new THREE.LineSegments(edges, mat);
+        group.add(line);
+        trail.push(line);
+      }
+
+      const coreMat = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.4,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const core = new THREE.LineSegments(edges, coreMat);
       group.add(core);
 
       scene.add(group);
-      this.items.set(fig.count, { fig, group, layers, core });
+      this.items.set(fig.count, { fig, group, main, trail, core });
     }
+    this.setTheme(settings.theme);
   }
 
   resize(w, h, pixelRatio) {
-    this.pixelRatio = pixelRatio;
-    for (const { group } of this.items.values()) {
-      for (const line of group.children) {
-        line.material.resolution.set(w * pixelRatio, h * pixelRatio);
-        line.material.linewidth = line.material.userData.baseWidth * pixelRatio;
-      }
+    for (const { main } of this.items.values()) {
+      main.material.resolution.set(w * pixelRatio, h * pixelRatio);
+      main.material.linewidth = main.material.userData.baseWidth * Math.max(1, pixelRatio);
     }
   }
 
+  setTrail(n) {
+    this.trailLen = Math.max(0, Math.min(TRAIL_MAX, n));
+  }
+
+  paint(item, hex) {
+    item.main.material.color.setHex(hex);
+    for (const line of item.trail) line.material.color.setHex(hex);
+  }
+
+  setTheme(index) {
+    this.themeIndex = index;
+    const theme = THEMES[index];
+    for (const item of this.items.values()) this.paint(item, theme.color(item.fig));
+  }
+
   setActive(count) {
-    if (this.active === count) return;
+    if (this.active === count) return false;
     if (this.active !== null) this.items.get(this.active).group.visible = false;
     this.active = count;
     this.items.get(count).group.visible = true;
     this.pop = 0;
+    return true;
   }
 
-  update(dt, state) {
+  pushHistory(x, y, q, s) {
+    this.head = (this.head + 1) % HIST;
+    const e = this.hist[this.head];
+    e.x = x;
+    e.y = y;
+    e.s = s;
+    e.q.copy(q);
+    this.count = Math.min(HIST, this.count + 1);
+  }
+
+  back(k) {
+    const i = Math.min(k, this.count - 1);
+    return this.hist[(this.head - i + HIST * 2) % HIST];
+  }
+
+  currentColor() {
+    const item = this.items.get(this.active);
+    return item.main.material.color;
+  }
+
+  update(dt, state, time) {
     if (this.active === null) return;
     const item = this.items.get(this.active);
 
@@ -386,31 +556,100 @@ class FigureSet {
     const popScale = this.pop >= 1 ? 1 : Math.max(0.001, easeOutBack(this.pop));
     const size = state.size * state.scale * popScale * state.presence;
 
-    this.history.push({ x: state.x, y: state.y, q: state.quat.clone(), s: size });
-    if (this.history.length > TRAIL * TRAIL_STEP + 2) this.history.shift();
+    if (THEMES[this.themeIndex].rainbow) {
+      tmpColor.setHSL((time * 0.12) % 1, 1, 0.6);
+      this.paint(item, tmpColor.getHex());
+    }
 
+    this.pushHistory(state.x, state.y, state.quat, size);
     item.group.visible = state.presence > 0.01;
 
-    const spin = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(0.3, 1, 0.2).normalize(),
-      this.idle
-    );
+    spinQ.setFromAxisAngle(spinAxis, this.idle);
 
-    item.layers.forEach((line, i) => {
-      const idx = Math.max(0, this.history.length - 1 - i * TRAIL_STEP);
-      const h = this.history[idx];
+    const main = item.main;
+    main.position.set(state.x, state.y, 0);
+    main.quaternion.copy(state.quat).multiply(spinQ);
+    main.scale.setScalar(Math.max(0.001, size));
+
+    for (let i = 0; i < item.trail.length; i++) {
+      const line = item.trail[i];
+      if (i >= this.trailLen || this.count < 2) {
+        line.visible = false;
+        continue;
+      }
+      line.visible = true;
+      const h = this.back((i + 1) * TRAIL_STEP);
       line.position.set(h.x, h.y, 0);
-      line.quaternion.copy(h.q).multiply(spin);
+      line.quaternion.copy(h.q).multiply(spinQ);
       line.scale.setScalar(Math.max(0.001, h.s));
-    });
+    }
 
-    const coreQ = state.quat.clone().multiply(spin).multiply(spin);
+    tmpQ.copy(state.quat).multiply(spinQ).multiply(spinQ);
     item.core.position.set(state.x, state.y, 0);
-    item.core.quaternion.copy(coreQ);
+    item.core.quaternion.copy(tmpQ);
     item.core.scale.setScalar(Math.max(0.001, size * 0.55));
   }
 }
 
+/* ---------- искры при смене фигуры ---------- */
+
+class Sparks {
+  constructor(scene, n = 140) {
+    this.n = n;
+    this.pos = new Float32Array(n * 3);
+    this.vel = new Float32Array(n * 3);
+    this.t = 0;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+    this.mat = new THREE.PointsMaterial({
+      size: 3,
+      sizeAttenuation: false,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+    });
+    this.points = new THREE.Points(geo, this.mat);
+    this.points.frustumCulled = false;
+    this.points.visible = false;
+    scene.add(this.points);
+  }
+
+  burst(x, y, color, radius) {
+    this.mat.color.copy(color);
+    for (let i = 0; i < this.n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = radius * (0.8 + Math.random() * 2.2);
+      this.pos[i * 3] = x;
+      this.pos[i * 3 + 1] = y;
+      this.pos[i * 3 + 2] = 0;
+      this.vel[i * 3] = Math.cos(a) * sp;
+      this.vel[i * 3 + 1] = Math.sin(a) * sp;
+      this.vel[i * 3 + 2] = 0;
+    }
+    this.t = 1;
+    this.points.visible = true;
+    this.points.geometry.attributes.position.needsUpdate = true;
+  }
+
+  update(dt) {
+    if (this.t <= 0) return;
+    this.t = Math.max(0, this.t - dt / 0.7);
+    const drag = Math.exp(-dt * 3);
+    for (let i = 0; i < this.n * 3; i += 3) {
+      this.pos[i] += this.vel[i] * dt;
+      this.pos[i + 1] += this.vel[i + 1] * dt;
+      this.vel[i] *= drag;
+      this.vel[i + 1] *= drag;
+    }
+    this.mat.opacity = this.t;
+    this.points.geometry.attributes.position.needsUpdate = true;
+    if (this.t === 0) this.points.visible = false;
+  }
+}
+
+/* ---------- сцена ---------- */
 
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -423,6 +662,7 @@ const hint = document.getElementById('hint');
 const statusEl = document.getElementById('status');
 const legend = document.getElementById('legend');
 const legendList = document.getElementById('legend-list');
+const toolbar = document.getElementById('toolbar');
 const startBox = document.getElementById('start');
 const startBtn = document.getElementById('start-btn');
 const startMsg = document.getElementById('start-msg');
@@ -430,7 +670,7 @@ const startMsg = document.getElementById('start-msg');
 let W = window.innerWidth;
 let H = window.innerHeight;
 
-const renderer = new THREE.WebGLRenderer({ canvas: fxCanvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas: fxCanvas, antialias: false, powerPreference: 'high-performance' });
 renderer.setClearColor(0x000000, 1);
 
 const scene = new THREE.Scene();
@@ -444,11 +684,28 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 const figures = new FigureSet(scene);
+const sparks = new Sparks(scene);
+
+// Уровни качества: если картинка тормозит, страница сама переходит на более лёгкий
+const dpr = window.devicePixelRatio || 1;
+const LEVELS = [
+  { pr: Math.min(dpr, 1.25), trail: TRAIL_MAX, bloom: true },
+  { pr: 1, trail: 5, bloom: true },
+  { pr: 0.8, trail: 3, bloom: false },
+];
+let level = 0;
+
+function applyQuality() {
+  const q = LEVELS[level];
+  figures.setTrail(settings.trail ? q.trail : 0);
+  resize();
+}
 
 function resize() {
   W = window.innerWidth;
   H = window.innerHeight;
-  const pr = Math.min(window.devicePixelRatio || 1, 2);
+  const pr = LEVELS[level].pr;
+  const skelPr = Math.min(dpr, 2);
 
   renderer.setPixelRatio(pr);
   renderer.setSize(W, H, false);
@@ -459,28 +716,38 @@ function resize() {
   camera.position.z = H / 2 / Math.tan((FOV / 2) * (Math.PI / 180));
   camera.updateProjectionMatrix();
 
-  skelCanvas.width = W * pr;
-  skelCanvas.height = H * pr;
-  skelCtx.setTransform(pr, 0, 0, pr, 0, 0);
+  skelCanvas.width = W * skelPr;
+  skelCanvas.height = H * skelPr;
+  skelCtx.setTransform(skelPr, 0, 0, skelPr, 0, 0);
 
   figures.resize(W, H, pr);
 }
 window.addEventListener('resize', resize);
-resize();
-
-legendList.innerHTML = FIGURES.slice()
-  .sort((a, b) => (a.count === 0 ? 6 : a.count) - (b.count === 0 ? 6 : b.count))
-  .map((f) => {
-    const hex = '#' + f.color.toString(16).padStart(6, '0');
-    const label = f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
-    return `<li data-count="${f.count}"><span class="dot" style="background:${hex}"></span>${label} — ${f.name.toLowerCase()}</li>`;
-  })
-  .join('');
+applyQuality();
 
 function pluralFingers(n) {
   if (n === 1) return 'палец';
   if (n >= 2 && n <= 4) return 'пальца';
   return 'пальцев';
+}
+
+const RAINBOW = 'conic-gradient(#f33, #fd3, #3f6, #3df, #53f, #f3d, #f33)';
+
+function legendColor(fig) {
+  const theme = THEMES[settings.theme];
+  if (theme.rainbow) return RAINBOW;
+  return '#' + theme.color(fig).toString(16).padStart(6, '0');
+}
+
+function renderLegend() {
+  legendList.innerHTML = FIGURES.slice()
+    .sort((a, b) => (a.count === 0 ? 6 : a.count) - (b.count === 0 ? 6 : b.count))
+    .map((f) => {
+      const label = f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
+      return `<li data-count="${f.count}"><span class="dot" style="background:${legendColor(f)}"></span>${label} — ${f.name.toLowerCase()}</li>`;
+    })
+    .join('');
+  markActive(leadCount);
 }
 
 function markActive(count) {
@@ -489,20 +756,10 @@ function markActive(count) {
   });
 }
 
-const target = {
-  x: 0,
-  y: 0,
-  quat: new THREE.Quaternion(),
-  seen: false,
-};
-const shown = {
-  x: 0,
-  y: 0,
-  quat: new THREE.Quaternion(),
-  scale: 1,
-  presence: 0,
-  size: 1,
-};
+/* ---------- состояние рук ---------- */
+
+const target = { x: 0, y: 0, quat: new THREE.Quaternion(), seen: false };
+const shown = { x: 0, y: 0, quat: new THREE.Quaternion(), scale: 1, presence: 0, size: 1 };
 let scaleTarget = 1;
 let hasLead = false;
 let hasSecond = false;
@@ -510,6 +767,15 @@ let leadCount = null;
 let candidate = null;
 let candidateFrames = 0;
 let landmarker = null;
+let facing = 'user';
+let mirror = true;
+
+const vY = new THREE.Vector3();
+const vSide = new THREE.Vector3();
+const vX = new THREE.Vector3();
+const vZ = new THREE.Vector3();
+const vTmp = new THREE.Vector3();
+const basis = new THREE.Matrix4();
 
 function cover() {
   const vw = video.videoWidth;
@@ -524,25 +790,36 @@ function pickHands(all) {
   return a[0].x < b[0].x ? { lead: a, second: b } : { lead: b, second: a };
 }
 
-function onResult(res) {
+function toScreenFn(c) {
+  return (p) => ({
+    x: mirror ? W - (c.ox + p.x * c.vw * c.s) : c.ox + p.x * c.vw * c.s,
+    y: c.oy + p.y * c.vh * c.s,
+  });
+}
+
+function setP(out, pts, i) {
+  return out.set(pts[i].x, -pts[i].y, -pts[i].z);
+}
+
+function onResult(res, dt) {
   skelCtx.clearRect(0, 0, W, H);
   const all = res.landmarks || [];
 
   if (all.length === 0) {
     hasLead = false;
     hasSecond = false;
+    leadFilter.reset();
+    secondFilter.reset();
     return;
   }
 
   const c = cover();
-  const { lead, second } = pickHands(all);
-  const toScreen = (p) => ({
-    x: W - (c.ox + p.x * c.vw * c.s),
-    y: c.oy + p.y * c.vh * c.s,
-  });
+  const picked = pickHands(all);
+  const lead = leadFilter.apply(picked.lead, dt);
+  const toScreen = toScreenFn(c);
 
   const leadScreen = lead.map(toScreen);
-  drawHand(skelCtx, leadScreen, '#ffffff', false);
+  if (settings.skeleton) drawHand(skelCtx, leadScreen, '#ffffff', false);
   hasLead = true;
 
   const leadPx = toPixels(lead, c.vw, c.vh);
@@ -555,7 +832,9 @@ function onResult(res) {
   }
   if (candidateFrames >= 4 && count !== leadCount) {
     leadCount = count;
-    figures.setActive(count);
+    if (figures.setActive(count)) {
+      sparks.burst(shown.x, shown.y, figures.currentColor(), shown.size * 1.6);
+    }
     markActive(count);
   }
 
@@ -568,36 +847,37 @@ function onResult(res) {
   target.x = cx / 5 - W / 2;
   target.y = H / 2 - cy / 5;
 
-  const P = (i) =>
-    new THREE.Vector3(
-      leadScreen[i].x,
-      -leadScreen[i].y,
-      -lead[i].z * c.vw * c.s
-    );
-  const yAxis = P(9).sub(P(0)).normalize();
-  const side = P(5).sub(P(17));
-  const xAxis = side.sub(yAxis.clone().multiplyScalar(side.dot(yAxis))).normalize();
-  const zAxis = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
-  const m = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
-  target.quat.setFromRotationMatrix(m);
+  const scale = c.vw * c.s;
+  const P = (out, i) => out.set(leadScreen[i].x, -leadScreen[i].y, -lead[i].z * scale);
+  P(vY, 9).sub(P(vTmp, 0)).normalize();
+  P(vSide, 5).sub(P(vTmp, 17));
+  vX.copy(vSide).sub(vTmp.copy(vY).multiplyScalar(vSide.dot(vY))).normalize();
+  vZ.crossVectors(vX, vY).normalize();
+  basis.makeBasis(vX, vY, vZ);
+  target.quat.setFromRotationMatrix(basis);
   target.seen = true;
 
-  if (second) {
-    const secScreen = second.map(toScreen);
-    drawHand(skelCtx, secScreen, '#ff6b81', true);
-    const ratio = pinchRatio(toPixels(second, c.vw, c.vh));
-    scaleTarget = ratioToScale(ratio);
+  if (picked.second) {
+    const second = secondFilter.apply(picked.second, dt);
+    if (settings.skeleton) drawHand(skelCtx, second.map(toScreen), '#ff6b81', true);
+    scaleTarget = ratioToScale(pinchRatio(toPixels(second, c.vw, c.vh)));
     hasSecond = true;
   } else {
+    secondFilter.reset();
     hasSecond = false;
   }
 }
 
+/* ---------- главный цикл ---------- */
+
 let lastTime = performance.now();
+let lastDetect = lastTime;
 let lastVideoTime = -1;
 let fpsFrames = 0;
 let fpsStamp = performance.now();
 let fps = 0;
+let lowStreak = 0;
+let wantShot = false;
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -606,7 +886,10 @@ function frame(now) {
 
   if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
-    onResult(landmarker.detectForVideo(video, performance.now()));
+    const t = performance.now();
+    const dtDet = Math.min(Math.max((t - lastDetect) / 1000, 1 / 120), 0.1);
+    lastDetect = t;
+    onResult(landmarker.detectForVideo(video, t), dtDet);
   }
 
   const follow = 1 - Math.exp(-dt * 16);
@@ -629,8 +912,16 @@ function frame(now) {
   const wantPresence = hasLead ? 1 : 0;
   shown.presence += (wantPresence - shown.presence) * (1 - Math.exp(-dt * 10));
 
-  figures.update(dt, shown);
-  composer.render();
+  figures.update(dt, shown, now / 1000);
+  sparks.update(dt);
+
+  if (settings.glow && LEVELS[level].bloom) composer.render();
+  else renderer.render(scene, camera);
+
+  if (wantShot) {
+    wantShot = false;
+    snapshot();
+  }
 
   hint.hidden = hasLead;
 
@@ -639,11 +930,120 @@ function frame(now) {
     fps = Math.round((fpsFrames * 1000) / (now - fpsStamp));
     fpsFrames = 0;
     fpsStamp = now;
-    const lead = hasLead && leadCount !== null ? leadCount : '—';
+    const leadText = hasLead && leadCount !== null ? leadCount : '—';
     const second = hasSecond ? 'масштаб ×' + shown.scale.toFixed(2) : '—';
-    statusEl.textContent = `ведущая рука: ${lead} · вторая рука: ${second} · ${fps} fps`;
+    statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps`;
+
+    // Автоматически упрощаем картинку, если fps долго низкий
+    if (!document.hidden && fps < 38 && level < LEVELS.length - 1) {
+      lowStreak++;
+      if (lowStreak >= 3) {
+        lowStreak = 0;
+        level++;
+        applyQuality();
+      }
+    } else {
+      lowStreak = 0;
+    }
   }
 }
+
+/* ---------- кнопки ---------- */
+
+function setPressed(btn, on) {
+  btn.setAttribute('aria-pressed', String(on));
+}
+
+const btnSkel = document.getElementById('btn-skel');
+const btnTrail = document.getElementById('btn-trail');
+const btnGlow = document.getElementById('btn-glow');
+const btnTheme = document.getElementById('btn-theme');
+const btnFlip = document.getElementById('btn-flip');
+const btnShot = document.getElementById('btn-shot');
+const btnFull = document.getElementById('btn-full');
+
+setPressed(btnSkel, settings.skeleton);
+setPressed(btnTrail, settings.trail);
+setPressed(btnGlow, settings.glow);
+btnTheme.textContent = 'Тема: ' + THEMES[settings.theme].name;
+figures.setTheme(settings.theme);
+applyQuality();
+renderLegend();
+
+btnSkel.addEventListener('click', () => {
+  settings.skeleton = !settings.skeleton;
+  setPressed(btnSkel, settings.skeleton);
+  if (!settings.skeleton) skelCtx.clearRect(0, 0, W, H);
+  saveSettings();
+});
+
+btnTrail.addEventListener('click', () => {
+  settings.trail = !settings.trail;
+  setPressed(btnTrail, settings.trail);
+  applyQuality();
+  saveSettings();
+});
+
+btnGlow.addEventListener('click', () => {
+  settings.glow = !settings.glow;
+  setPressed(btnGlow, settings.glow);
+  saveSettings();
+});
+
+btnTheme.addEventListener('click', () => {
+  settings.theme = (settings.theme + 1) % THEMES.length;
+  figures.setTheme(settings.theme);
+  btnTheme.textContent = 'Тема: ' + THEMES[settings.theme].name;
+  renderLegend();
+  saveSettings();
+});
+
+btnShot.addEventListener('click', () => { wantShot = true; });
+
+if (document.documentElement.requestFullscreen) {
+  btnFull.addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen().catch(() => {});
+  });
+} else {
+  btnFull.hidden = true;
+}
+
+function snapshot() {
+  const out = document.createElement('canvas');
+  out.width = fxCanvas.width;
+  out.height = fxCanvas.height;
+  const ctx = out.getContext('2d');
+  const k = out.width / W;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, out.width, out.height);
+
+  const c = cover();
+  ctx.save();
+  if (mirror) {
+    ctx.translate(out.width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, c.ox * k, c.oy * k, c.vw * c.s * k, c.vh * c.s * k);
+  ctx.restore();
+
+  ctx.globalCompositeOperation = 'screen';
+  ctx.drawImage(fxCanvas, 0, 0, out.width, out.height);
+  ctx.globalCompositeOperation = 'source-over';
+  if (settings.skeleton) ctx.drawImage(skelCanvas, 0, 0, out.width, out.height);
+
+  out.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'hand-figure.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }, 'image/png');
+}
+
+/* ---------- камера и модель ---------- */
 
 async function createLandmarker() {
   const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm');
@@ -669,18 +1069,39 @@ function showError(text) {
   startBtn.textContent = 'Попробовать снова';
 }
 
+async function openCamera() {
+  if (video.srcObject) video.srcObject.getTracks().forEach((t) => t.stop());
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  mirror = facing === 'user';
+  video.style.transform = mirror ? 'scaleX(-1)' : 'none';
+  lastVideoTime = -1;
+  leadFilter.reset();
+  secondFilter.reset();
+  await video.play();
+}
+
+btnFlip.addEventListener('click', async () => {
+  const previous = facing;
+  facing = facing === 'user' ? 'environment' : 'user';
+  try {
+    await openCamera();
+  } catch (err) {
+    facing = previous;
+    try { await openCamera(); } catch (e) { /* камера недоступна */ }
+  }
+});
+
 async function start() {
   startBtn.disabled = true;
   startMsg.classList.remove('error');
   startMsg.textContent = 'Запускаю камеру…';
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false,
-    });
-    video.srcObject = stream;
-    await video.play();
+    await openCamera();
   } catch (err) {
     if (err && err.name === 'NotAllowedError') {
       showError('Доступ к камере запрещён. Разрешите камеру в адресной строке браузера и нажмите кнопку ещё раз.');
@@ -702,6 +1123,7 @@ async function start() {
 
   startBox.classList.add('hidden');
   legend.hidden = false;
+  toolbar.hidden = false;
   hint.hidden = false;
   resize();
   requestAnimationFrame(frame);
