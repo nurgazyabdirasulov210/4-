@@ -29,6 +29,7 @@ html, body {
 }
 
 #cam {
+  opacity: 0;
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -246,6 +247,7 @@ html, body {
     <button id="btn-skel" type="button" aria-pressed="true">Скелет</button>
     <button id="btn-trail" type="button" aria-pressed="true">След</button>
     <button id="btn-glow" type="button" aria-pressed="true">Свечение</button>
+    <button id="btn-video" type="button" aria-pressed="false">Видео</button>
     <button id="btn-theme" type="button">Тема: Неон</button>
     <button id="btn-attach" type="button">К руке</button>
     <button id="btn-flip" type="button">Камера</button>
@@ -284,7 +286,7 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 
 /* ---------- настройки ---------- */
 
-const settings = { skeleton: true, trail: true, glow: true, theme: 0 };
+const settings = { skeleton: true, trail: true, glow: true, theme: 0, video: false };
 try {
   Object.assign(settings, JSON.parse(localStorage.getItem('hand-figure') || '{}'));
 } catch (e) { /* без сохранения настроек тоже работает */ }
@@ -316,6 +318,12 @@ function countFingers(p) {
   if (thumbOut) count++;
 
   return count;
+}
+
+// Выпрямлен только средний палец
+function isMiddleFinger(p) {
+  const ext = (tip, joint) => dist(p[tip], p[0]) > dist(p[joint], p[0]) * 1.12;
+  return ext(12, 10) && !ext(8, 6) && !ext(16, 14) && !ext(20, 18);
 }
 
 function pinchRatio(p) {
@@ -420,6 +428,34 @@ function drawHand(ctx, pts, color, pinch) {
 
 /* ---------- фигуры и темы ---------- */
 
+// Рука со средним пальцем, собранная из параллелепипедов и пирамиды
+function handEdges() {
+  const parts = [
+    [new THREE.BoxGeometry(1.5, 1.0, 0.6), 0, -0.5, 0, 0],
+    [new THREE.BoxGeometry(0.34, 1.45, 0.34), -0.18, 0.72, 0, 0],
+    [new THREE.ConeGeometry(0.24, 0.35, 4), -0.18, 1.62, 0, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), -0.54, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), 0.18, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.34, 0.36, 0.4), 0.54, 0.18, 0.1, 0],
+    [new THREE.BoxGeometry(0.3, 0.7, 0.34), -0.98, -0.25, 0.1, -0.7],
+  ];
+  const arr = [];
+  for (const [g, x, y, z, rz] of parts) {
+    g.rotateZ(rz);
+    g.translate(x, y - 0.35, z);
+    g.scale(0.75, 0.75, 0.75);
+    const e = new THREE.EdgesGeometry(g, 5);
+    for (const v of e.attributes.position.array) arr.push(v);
+    g.dispose();
+    e.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  return out;
+}
+
+const MIDDLE = 99;
+
 const FIGURES = [
   { count: 1, name: 'Тетраэдр', color: 0x39e6ff, make: () => new THREE.TetrahedronGeometry(1.15) },
   { count: 2, name: 'Куб', color: 0x5dff8a, make: () => new THREE.BoxGeometry(1.5, 1.5, 1.5) },
@@ -427,6 +463,7 @@ const FIGURES = [
   { count: 4, name: 'Додекаэдр', color: 0xff8a2b, make: () => new THREE.DodecahedronGeometry(1.05) },
   { count: 5, name: 'Икосаэдр', color: 0xff4fb8, make: () => new THREE.IcosahedronGeometry(1.1) },
   { count: 0, name: 'Тор', color: 0xdfeaff, make: () => new THREE.TorusGeometry(0.95, 0.32, 10, 28) },
+  { count: MIDDLE, name: 'Средний палец', color: 0xff3b3b, edges: handEdges },
 ];
 
 const THEMES = [
@@ -465,9 +502,14 @@ class FigureSet {
     this.count = 0;
 
     for (const fig of FIGURES) {
-      const base = fig.make();
-      const edges = new THREE.EdgesGeometry(base, 5);
-      base.dispose();
+      let edges;
+      if (fig.edges) {
+        edges = fig.edges();
+      } else {
+        const base = fig.make();
+        edges = new THREE.EdgesGeometry(base, 5);
+        base.dispose();
+      }
 
       const group = new THREE.Group();
       group.visible = false;
@@ -765,8 +807,8 @@ function renderLegend() {
   legendList.innerHTML = FIGURES.slice()
     .sort((a, b) => (a.count === 0 ? 6 : a.count) - (b.count === 0 ? 6 : b.count))
     .map((f) => {
-      const label = f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
-      return `<li data-count="${f.count}"><span class="dot" style="background:${legendColor(f)}"></span>${label} — ${f.name.toLowerCase()}</li>`;
+      const label = f.count === MIDDLE ? 'Средний палец' : f.count === 0 ? 'Кулак' : f.count + ' ' + pluralFingers(f.count);
+      return `<li data-count="${f.count}"><span class="dot" style="background:${legendColor(f)}"></span>${label}${f.count === MIDDLE ? '' : ' — ' + f.name.toLowerCase()}</li>`;
     })
     .join('');
   markActive(leadCount);
@@ -969,7 +1011,7 @@ function onResult(res, dt) {
     hasLead = true;
 
     const leadPx = toPixels(lead, c.vw, c.vh);
-    const count = countFingers(leadPx);
+    const count = isMiddleFinger(leadPx) ? MIDDLE : countFingers(leadPx);
     if (count === candidate) {
       candidateFrames++;
     } else {
@@ -1096,7 +1138,7 @@ function frame(now) {
     fps = Math.round((fpsFrames * 1000) / (now - fpsStamp));
     fpsFrames = 0;
     fpsStamp = now;
-    const leadText = hasLead && leadCount !== null ? leadCount : '—';
+    const leadText = hasLead && leadCount !== null ? (leadCount === MIDDLE ? 'средний палец' : leadCount) : '—';
     const second = hasSecond ? (grab.active ? 'перенос' : 'размер') + ' ×' + shown.scale.toFixed(2) : '—';
     statusEl.textContent = `ведущая рука: ${leadText} · вторая рука: ${second} · ${fps} fps`;
 
@@ -1123,6 +1165,7 @@ function setPressed(btn, on) {
 const btnSkel = document.getElementById('btn-skel');
 const btnTrail = document.getElementById('btn-trail');
 const btnGlow = document.getElementById('btn-glow');
+const btnVideo = document.getElementById('btn-video');
 const btnTheme = document.getElementById('btn-theme');
 const btnFlip = document.getElementById('btn-flip');
 const btnAttach = document.getElementById('btn-attach');
@@ -1133,6 +1176,8 @@ const btnFull = document.getElementById('btn-full');
 setPressed(btnSkel, settings.skeleton);
 setPressed(btnTrail, settings.trail);
 setPressed(btnGlow, settings.glow);
+setPressed(btnVideo, settings.video);
+video.style.opacity = settings.video ? '1' : '0';
 btnTheme.textContent = 'Тема: ' + THEMES[settings.theme].name;
 figures.setTheme(settings.theme);
 applyQuality();
@@ -1155,6 +1200,13 @@ btnTrail.addEventListener('click', () => {
 btnGlow.addEventListener('click', () => {
   settings.glow = !settings.glow;
   setPressed(btnGlow, settings.glow);
+  saveSettings();
+});
+
+btnVideo.addEventListener('click', () => {
+  settings.video = !settings.video;
+  setPressed(btnVideo, settings.video);
+  video.style.opacity = settings.video ? '1' : '0';
   saveSettings();
 });
 
@@ -1189,13 +1241,15 @@ function snapshot() {
   ctx.fillRect(0, 0, out.width, out.height);
 
   const c = cover();
-  ctx.save();
-  if (mirror) {
-    ctx.translate(out.width, 0);
-    ctx.scale(-1, 1);
+  if (settings.video) {
+    ctx.save();
+    if (mirror) {
+      ctx.translate(out.width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, c.ox * k, c.oy * k, c.vw * c.s * k, c.vh * c.s * k);
+    ctx.restore();
   }
-  ctx.drawImage(video, c.ox * k, c.oy * k, c.vw * c.s * k, c.vh * c.s * k);
-  ctx.restore();
 
   ctx.globalCompositeOperation = 'screen';
   ctx.drawImage(fxCanvas, 0, 0, out.width, out.height);
